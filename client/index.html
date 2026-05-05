@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PulseCare HMS</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Manrope:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link
+      rel="stylesheet"
+      href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css"
+      integrity="sha512-SnH5WK+bZxgPHs44uWIX+LLJAJ9/2PkPKZ5QiAj6Ta86w+fsb2TkR4j8yYChq9hQyI1jRnbZ0Wf0hU8uYb8Jkw=="
+      crossorigin="anonymous"
+      referrerpolicy="no-referrer"
+    />
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <div class="main-panel">
+        <header class="topbar">
+          <div class="topbar__intro">
+            <div class="topbar__brand">
+              <div class="brand-badge"><i class="fa-solid fa-heart-pulse"></i></div>
+              <div>
+                <p class="eyebrow">Hospital Flow</p>
+                <h1>PulseCare HMS</h1>
+              </div>
+            </div>
+            <div>
+              <p class="eyebrow" id="pageEyebrow">Welcome</p>
+              <h2 id="pageTitle">Hospital Management System</h2>
+            </div>
+          </div>
+          <div class="topbar__meta">
+            <nav class="topbar__nav" id="sidebarNav"></nav>
+            <button class="theme-toggle" id="themeToggle" type="button"></button>
+            <div class="user-chip" id="userChip"></div>
+            <button class="secondary-button hidden" id="logoutButton" type="button">
+              <i class="fa-solid fa-arrow-right-from-bracket"></i>
+              <span>Logout</span>
+            </button>
+          </div>
+        </header>
+
+        <main class="content" id="app"></main>
+      </div>
+    </div>
+
+    <template id="loginTemplate">
+      <section class="hero">
+        <div class="hero__copy">
+          <p class="eyebrow">Digital Care Journey</p>
+          <h2>Book faster, manage smarter, and track live queues in one place.</h2>
+          <p>
+            Patients can browse hospitals, pick doctors, reserve tokens, and monitor
+            queue progress. Admins get a responsive operations panel with live counts
+            and management tools.
+          </p>
+          <button class="primary-button hero__button" id="loginButton" type="button">
+            <i class="fa-brands fa-google"></i>
+            <span>Continue with Google</span>
+          </button>
+        </div>
+        <div class="hero__visual">
+          <div class="hero-card glass">
+            <div class="hero-card__row">
+              <span>Live token tracking</span>
+              <strong>Queue first design</strong>
+            </div>
+            <div class="hero-metrics">
+              <div>
+                <small>Hospitals</small>
+                <strong>Connected by city</strong>
+              </div>
+              <div>
+                <small>Appointments</small>
+                <strong>Smart token generation</strong>
+              </div>
+              <div>
+                <small>Admin tools</small>
+                <strong>Role protected access</strong>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </template>
+
+    <div class="toast-stack" id="toastStack"></div>
+    <div class="loading-overlay hidden" id="loadingOverlay">
+      <div class="spinner-card">
+        <div class="spinner"></div>
+        <p>Loading your hospital dashboard...</p>
+      </div>
+    </div>
+
+    <script src="/script.js"></script>
+  </body>
+</html>
