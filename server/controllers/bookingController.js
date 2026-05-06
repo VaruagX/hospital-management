@@ -2,6 +2,7 @@ const pool = require("../config/db");
 const {
   buildDoctorSlots,
 } = require("../utils/slots");
+const PRIORITY_RANK_SQL = `CASE WHEN COALESCE(priority, 'normal') = 'emergency' THEN 0 ELSE 1 END`;
 
 const DAY_NAMES = [
   "sunday",
@@ -13,6 +14,32 @@ const DAY_NAMES = [
   "saturday",
 ];
 
+function normalizePriority(priority) {
+  return String(priority || "normal").toLowerCase() === "emergency"
+    ? "emergency"
+    : "normal";
+}
+
+function getPriorityRank(priority) {
+  return normalizePriority(priority) === "emergency" ? 0 : 1;
+}
+
+function formatNotificationDate(value) {
+  return new Date(`${value}T12:00:00`).toLocaleDateString("en-US", {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  });
+}
+
+async function createNotification(client, { userId, appointmentId, type, title, message }) {
+  await client.query(
+    `INSERT INTO notifications (user_id, appointment_id, type, title, message)
+     VALUES ($1, $2, $3, $4, $5)`,
+    [userId, appointmentId || null, type, title, message]
+  );
+}
+
 async function createAppointment(req, res, next) {
   const client = await pool.connect();
 
@@ -23,12 +50,19 @@ async function createAppointment(req, res, next) {
       date,
       doctor_id: doctorId,
       hospital_id: hospitalId,
-      slot_number: slotNumber,
       family_member_id: familyMemberId,
+      reason_for_visit: reasonForVisit,
+      priority,
     } = req.body;
+    const normalizedPriority = normalizePriority(priority);
+    const trimmedReasonForVisit = String(reasonForVisit || "").trim();
 
     if (!mobile || !date || !doctorId || !hospitalId) {
       return res.status(400).json({ error: "Doctor, hospital, date, and mobile are required" });
+    }
+
+    if (!trimmedReasonForVisit) {
+      return res.status(400).json({ error: "Reason for visit is required" });
     }
 
     await client.query("BEGIN");
@@ -46,6 +80,23 @@ async function createAppointment(req, res, next) {
     if (dayBlockMessage) {
       await client.query("ROLLBACK");
       return res.status(400).json({ error: dayBlockMessage });
+    }
+
+    const leaveBlockMessage = await getDoctorLeaveMessage(client, doctorId, date);
+    if (leaveBlockMessage) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ error: leaveBlockMessage });
+    }
+
+    const activeAppointments = await getActiveAppointmentCount(client, doctorId, date);
+    if (
+      doctor.max_patients_per_day &&
+      activeAppointments >= Number(doctor.max_patients_per_day)
+    ) {
+      await client.query("ROLLBACK");
+      return res.status(409).json({
+        error: `Daily booking limit reached for Dr. ${doctor.name}.`,
+      });
     }
 
     const nextTokenNumber = await getNextTokenNumber(client, doctorId, date);
@@ -74,8 +125,12 @@ async function createAppointment(req, res, next) {
        FROM appointments
        WHERE doctor_id = $1
          AND appointment_date = $2
-         AND COALESCE(token_number, 0) < $3`,
-      [doctorId, date, nextTokenNumber]
+         AND COALESCE(status, 'booked') <> 'cancelled'
+         AND (
+           ${PRIORITY_RANK_SQL} < $3
+           OR (${PRIORITY_RANK_SQL} = $3 AND COALESCE(token_number, 0) < $4)
+         )`,
+      [doctorId, date, getPriorityRank(normalizedPriority), nextTokenNumber]
     );
 
     const appointmentResult = await client.query(
@@ -91,9 +146,11 @@ async function createAppointment(req, res, next) {
          slot_start,
          slot_end,
          family_member_id,
+         reason_for_visit,
+         priority,
          status
        )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
        RETURNING id,
                  TO_CHAR(appointment_date, 'YYYY-MM-DD') AS appointment_date,
                  token_number,
@@ -103,6 +160,8 @@ async function createAppointment(req, res, next) {
                  doctor_id,
                  hospital_id,
                  family_member_id,
+                 reason_for_visit,
+                 COALESCE(priority, 'normal') AS priority,
                  status`,
       [
         req.user.id,
@@ -116,13 +175,30 @@ async function createAppointment(req, res, next) {
         selectedSlot.startTime,
         selectedSlot.endTime,
         familyMember?.id || null,
+        trimmedReasonForVisit,
+        normalizedPriority,
         "booked",
       ]
     );
 
-    await client.query("COMMIT");
+    await client.query(
+      `UPDATE users
+       SET phone = $1
+       WHERE id = $2`,
+      [mobile, req.user.id]
+    );
 
     const appointment = appointmentResult.rows[0];
+
+    await createNotification(client, {
+      userId: req.user.id,
+      appointmentId: appointment.id,
+      type: "booking_created",
+      title: "Booking created",
+      message: `Appointment with Dr. ${doctor.name} at ${doctor.hospital_name} was booked for ${formatNotificationDate(date)}.`,
+    });
+
+    await client.query("COMMIT");
 
     return res.status(201).json({
       ...appointment,
@@ -141,25 +217,47 @@ async function createAppointment(req, res, next) {
 }
 
 async function cancelAppointment(req, res, next) {
+  const client = await pool.connect();
+
   try {
     const { appointmentId } = req.params;
-    const result = await pool.query(
-      `UPDATE appointments
+    await client.query("BEGIN");
+    const result = await client.query(
+      `UPDATE appointments a
        SET status = 'cancelled'
-       WHERE id = $1
-         AND user_id = $2
-         AND COALESCE(status, 'booked') NOT IN ('completed', 'cancelled')
-       RETURNING id`,
+       FROM doctors d, hospitals h
+       WHERE a.id = $1
+         AND a.user_id = $2
+         AND COALESCE(a.status, 'booked') NOT IN ('completed', 'cancelled')
+         AND d.id = a.doctor_id
+         AND h.id = a.hospital_id
+       RETURNING a.id,
+                 d.name AS doctor_name,
+                 h.name AS hospital_name,
+                 TO_CHAR(a.appointment_date, 'YYYY-MM-DD') AS appointment_date`,
       [appointmentId, req.user.id]
     );
 
     if (!result.rows[0]) {
+      await client.query("ROLLBACK");
       return res.status(404).json({ error: "Appointment cannot be cancelled" });
     }
 
+    await createNotification(client, {
+      userId: req.user.id,
+      appointmentId: result.rows[0].id,
+      type: "booking_cancelled",
+      title: "Appointment cancelled",
+      message: `Your appointment with Dr. ${result.rows[0].doctor_name} at ${result.rows[0].hospital_name} on ${formatNotificationDate(result.rows[0].appointment_date)} was cancelled.`,
+    });
+
+    await client.query("COMMIT");
     return res.json({ success: true });
   } catch (error) {
+    await client.query("ROLLBACK");
     return next(error);
+  } finally {
+    client.release();
   }
 }
 
@@ -168,7 +266,7 @@ async function rescheduleAppointment(req, res, next) {
 
   try {
     const { appointmentId } = req.params;
-    const { date, slot_number: slotNumber } = req.body;
+    const { date } = req.body;
 
     if (!date) {
       return res.status(400).json({ error: "New appointment date is required" });
@@ -176,7 +274,8 @@ async function rescheduleAppointment(req, res, next) {
 
     await client.query("BEGIN");
     const appointmentLookup = await client.query(
-      `SELECT id, doctor_id, hospital_id, user_id, status
+      `SELECT id, doctor_id, hospital_id, user_id, status,
+              TO_CHAR(appointment_date, 'YYYY-MM-DD') AS previous_date
        FROM appointments
        WHERE id = $1 AND user_id = $2
        LIMIT 1`,
@@ -194,10 +293,36 @@ async function rescheduleAppointment(req, res, next) {
     ]);
 
     const doctor = await getDoctorBookingMeta(client, appointment.doctor_id, appointment.hospital_id);
+    if (!doctor) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ error: "Doctor or hospital not found" });
+    }
     const dayBlockMessage = getDoctorBlockedMessage(doctor, date);
     if (dayBlockMessage) {
       await client.query("ROLLBACK");
       return res.status(400).json({ error: dayBlockMessage });
+    }
+
+    const leaveBlockMessage = await getDoctorLeaveMessage(client, appointment.doctor_id, date);
+    if (leaveBlockMessage) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ error: leaveBlockMessage });
+    }
+
+    const activeAppointments = await getActiveAppointmentCount(
+      client,
+      appointment.doctor_id,
+      date,
+      appointment.id
+    );
+    if (
+      doctor.max_patients_per_day &&
+      activeAppointments >= Number(doctor.max_patients_per_day)
+    ) {
+      await client.query("ROLLBACK");
+      return res.status(409).json({
+        error: `Daily booking limit reached for Dr. ${doctor.name}.`,
+      });
     }
 
     const nextTokenNumber = await getNextTokenNumber(
@@ -232,6 +357,14 @@ async function rescheduleAppointment(req, res, next) {
         appointment.id,
       ]
     );
+
+    await createNotification(client, {
+      userId: req.user.id,
+      appointmentId: updated.rows[0].id,
+      type: "booking_rescheduled",
+      title: "Appointment rescheduled",
+      message: `Your appointment with Dr. ${doctor.name} at ${doctor.hospital_name} moved from ${formatNotificationDate(appointment.previous_date)} to ${formatNotificationDate(date)}.`,
+    });
 
     await client.query("COMMIT");
     return res.json({ success: true, appointmentId: updated.rows[0].id });
@@ -292,6 +425,8 @@ async function getDoctorBookingMeta(client, doctorId, hospitalId) {
     `SELECT d.id,
             d.name,
             d.specialization,
+            d.department_id,
+            d.max_patients_per_day,
             d.available_from,
             d.available_to,
             d.slot_step_minutes,
@@ -325,6 +460,25 @@ function getDoctorBlockedMessage(doctor, date) {
     : `Doctor unavailable on ${bookingDay}.`;
 }
 
+async function getDoctorLeaveMessage(client, doctorId, date) {
+  const result = await client.query(
+    `SELECT reason
+     FROM doctor_leaves
+     WHERE doctor_id = $1
+       AND leave_date = $2
+     LIMIT 1`,
+    [doctorId, date]
+  );
+
+  if (!result.rows[0]) {
+    return "";
+  }
+
+  return result.rows[0].reason
+    ? `Doctor is on leave on ${date}. ${result.rows[0].reason}`
+    : `Doctor is on leave on ${date}.`;
+}
+
 function getDateDayIndex(value) {
   return new Date(`${value}T12:00:00`).getDay();
 }
@@ -338,6 +492,28 @@ function findSelectableSlot(doctor, slotNumber) {
   });
 
   return slots.find((slot) => slot.slotNumber === Number(slotNumber)) || null;
+}
+
+async function getActiveAppointmentCount(client, doctorId, date, excludeAppointmentId = null) {
+  const values = [doctorId, date];
+  let excludeClause = "";
+
+  if (excludeAppointmentId) {
+    values.push(excludeAppointmentId);
+    excludeClause = ` AND id <> $${values.length}`;
+  }
+
+  const result = await client.query(
+    `SELECT COUNT(*)::int AS active_appointments
+     FROM appointments
+     WHERE doctor_id = $1
+       AND appointment_date = $2
+       AND COALESCE(status, 'booked') <> 'cancelled'
+       ${excludeClause}`,
+    values
+  );
+
+  return Number(result.rows[0]?.active_appointments || 0);
 }
 
 async function getBookedSlotNumbers(client, doctorId, date, excludeAppointmentId = null) {

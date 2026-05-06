@@ -9,27 +9,42 @@ const state = {
     hospitals: [],
   },
   familyMembers: [],
+  hospitalDetail: null,
+  doctorDetail: null,
+  profile: null,
+  notifications: {
+    items: [],
+    unreadCount: 0,
+  },
   slotAvailability: {},
   myAppointments: { upcoming: [], past: [] },
   filters: {
     cityId: "",
     hospitalId: "",
+    departmentId: "",
     specialization: "",
     day: "",
     search: "",
   },
   admin: {
     stats: null,
-    chart: [],
+    charts: {
+      bookingsPerDay: [],
+      topDoctors: [],
+      topHospitals: [],
+    },
+    departments: [],
     hospitals: [],
     doctors: [],
     cities: [],
     appointments: [],
+    doctorLeaves: [],
     board: [],
     appointmentFilters: {
       date: "",
       hospital: "",
       doctor: "",
+      priority: "",
       status: "",
     },
   },
@@ -40,11 +55,16 @@ const state = {
   route: "home",
   theme: localStorage.getItem("pulsecare-theme") || "dark",
   editingDoctorId: null,
+  editingHospitalId: null,
+  mobileMenuOpen: false,
 };
 
 const app = document.getElementById("app");
 const sidebarNav = document.getElementById("sidebarNav");
+const menuToggle = document.getElementById("menuToggle");
+const navScrim = document.getElementById("navScrim");
 const themeToggle = document.getElementById("themeToggle");
+const installButton = document.getElementById("installButton");
 const logoutButton = document.getElementById("logoutButton");
 const userChip = document.getElementById("userChip");
 const loadingOverlay = document.getElementById("loadingOverlay");
@@ -55,9 +75,12 @@ const APPOINTMENT_SLOT_START_TIME = "10:00";
 const APPOINTMENT_SLOT_STEP_MINUTES = 15;
 const APPOINTMENT_SLOT_DURATION_MINUTES = 15;
 let autoRefreshTimer = null;
+let adminCharts = [];
+let deferredInstallPrompt = null;
 
 document.body.dataset.theme = state.theme;
 updateThemeLabel();
+syncMobileMenu();
 
 themeToggle.addEventListener("click", () => {
   state.theme = state.theme === "dark" ? "light" : "dark";
@@ -66,12 +89,25 @@ themeToggle.addEventListener("click", () => {
   updateThemeLabel();
 });
 
+menuToggle.addEventListener("click", () => {
+  state.mobileMenuOpen = !state.mobileMenuOpen;
+  syncMobileMenu();
+});
+
+navScrim.addEventListener("click", () => {
+  closeMobileMenu();
+});
+
 logoutButton.addEventListener("click", async () => {
   await apiFetch("/api/logout", { method: "POST" }, { skipAuthRedirect: true });
   state.session = null;
   state.route = "home";
   state.selectedCity = null;
   state.selectedHospital = null;
+  state.hospitalDetail = null;
+  state.doctorDetail = null;
+  state.profile = null;
+  state.notifications = { items: [], unreadCount: 0 };
   state.latestAppointment = null;
   state.favorites = { doctors: [], hospitals: [] };
   state.familyMembers = [];
@@ -80,10 +116,44 @@ logoutButton.addEventListener("click", async () => {
   render();
 });
 
+installButton.addEventListener("click", async () => {
+  if (!deferredInstallPrompt) return;
+  deferredInstallPrompt.prompt();
+  const choice = await deferredInstallPrompt.userChoice.catch(() => null);
+  if (choice?.outcome) {
+    showToast(
+      choice.outcome === "accepted"
+        ? "PulseCare is being installed."
+        : "Install prompt dismissed.",
+      choice.outcome === "accepted" ? "success" : "error"
+    );
+  }
+  deferredInstallPrompt = null;
+  updateInstallButtonVisibility();
+});
+
 document.addEventListener("click", handleClick);
 document.addEventListener("submit", handleSubmit);
 document.addEventListener("input", handleInput);
 document.addEventListener("change", handleChange);
+
+window.addEventListener("beforeinstallprompt", (event) => {
+  event.preventDefault();
+  deferredInstallPrompt = event;
+  updateInstallButtonVisibility();
+});
+
+window.addEventListener("appinstalled", () => {
+  deferredInstallPrompt = null;
+  updateInstallButtonVisibility();
+  showToast("PulseCare installed on this device.");
+});
+
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("/sw.js").catch(() => {});
+  });
+}
 
 init();
 
@@ -91,16 +161,28 @@ async function init() {
   try {
     await hydrateSession();
     if (state.session?.authenticated) {
-      await Promise.all([loadCities(), loadFavorites(), loadFamilyMembers()]);
+      await Promise.all([loadCities(), loadFavorites(), loadFamilyMembers(), loadNotifications()]);
       const params = new URLSearchParams(window.location.search);
       const appointmentId = params.get("appointment");
       if (appointmentId) {
         await loadAppointmentDetails(appointmentId);
         state.route = "confirmation";
+      } else if (window.location.pathname === "/profile") {
+        state.route = "profile";
+        await Promise.all([loadProfile(), loadMyAppointments()]);
+      } else if (window.location.pathname === "/notifications") {
+        state.route = "notifications";
+        await loadNotifications({ markRead: true });
+      } else if (/^\/hospital\/\d+$/.test(window.location.pathname)) {
+        state.route = "hospital-detail";
+        await loadHospitalDetail(window.location.pathname.split("/")[2]);
+      } else if (/^\/doctor\/\d+$/.test(window.location.pathname)) {
+        state.route = "doctor-detail";
+        await loadDoctorDetail(window.location.pathname.split("/")[2]);
       } else if (window.location.pathname === "/admin/board" && isAdmin()) {
         state.route = "admin-board";
         await loadAdminBoard();
-      } else if (/^\/doctor\/\d+\/today$/.test(window.location.pathname) && isAdmin()) {
+      } else if (/^\/doctor\/\d+\/today$/.test(window.location.pathname) && isStaff()) {
         state.route = "doctor-today";
         await loadDoctorToday(window.location.pathname.split("/")[2]);
       } else if (window.location.pathname === "/admin" && isAdmin()) {
@@ -159,6 +241,7 @@ async function loadDoctorDirectory() {
   const params = new URLSearchParams();
   if (state.filters.cityId) params.set("cityId", state.filters.cityId);
   if (state.filters.hospitalId) params.set("hospitalId", state.filters.hospitalId);
+  if (state.filters.departmentId) params.set("departmentId", state.filters.departmentId);
   if (state.filters.specialization) params.set("specialization", state.filters.specialization);
   if (state.filters.day) params.set("day", state.filters.day);
   if (state.filters.search) params.set("search", state.filters.search);
@@ -181,6 +264,86 @@ async function loadFamilyMembers() {
   state.familyMembers = await apiFetch("/family-members", {}, { silent: true });
 }
 
+async function loadProfile() {
+  state.profile = await apiFetch("/profile", {}, { silent: true });
+  return state.profile;
+}
+
+async function loadNotifications(options = {}) {
+  state.notifications = await apiFetch("/notifications", {}, { silent: true });
+
+  if (options.markRead && state.notifications.unreadCount) {
+    await apiFetch("/notifications/read", { method: "POST" }, { silent: true });
+    state.notifications = {
+      ...state.notifications,
+      unreadCount: 0,
+      items: state.notifications.items.map((item) => ({ ...item, is_read: true })),
+    };
+  }
+
+  return state.notifications;
+}
+
+async function loadHospitalDetail(hospitalId) {
+  state.hospitalDetail = await apiFetch(`/hospital/${hospitalId}/details`, {}, { silent: true });
+  state.selectedHospital = state.hospitalDetail;
+  state.selectedCity = state.hospitalDetail
+    ? {
+        id: Number(state.hospitalDetail.city_id),
+        name: state.hospitalDetail.city_name,
+      }
+    : state.selectedCity;
+  return state.hospitalDetail;
+}
+
+async function loadDoctorDetail(doctorId) {
+  state.doctorDetail = await apiFetch(`/doctor/${doctorId}/details`, {}, { silent: true });
+  if (state.doctorDetail) {
+    state.selectedHospital = {
+      id: Number(state.doctorDetail.hospital_id),
+      name: state.doctorDetail.hospital_name,
+      city_id: Number(state.doctorDetail.city_id),
+      city_name: state.doctorDetail.city_name,
+      location: state.doctorDetail.hospital_location,
+      contact_phone: state.doctorDetail.hospital_contact_phone,
+      map_link: state.doctorDetail.hospital_map_link,
+    };
+    state.selectedCity = {
+      id: Number(state.doctorDetail.city_id),
+      name: state.doctorDetail.city_name,
+    };
+  }
+  return state.doctorDetail;
+}
+
+async function openProfilePage() {
+  await Promise.all([loadProfile(), loadMyAppointments()]);
+  state.route = "profile";
+  history.replaceState({}, "", "/profile");
+  closeMobileMenu();
+  render();
+}
+
+async function openHospitalDetailPage(hospitalId) {
+  await loadHospitalDetail(hospitalId);
+  state.filters.cityId = String(state.hospitalDetail?.city_id || "");
+  state.filters.hospitalId = String(state.hospitalDetail?.id || "");
+  state.route = "hospital-detail";
+  history.replaceState({}, "", `/hospital/${hospitalId}`);
+  closeMobileMenu();
+  render();
+}
+
+async function openDoctorDetailPage(doctorId) {
+  await loadDoctorDetail(doctorId);
+  state.filters.cityId = String(state.doctorDetail?.city_id || "");
+  state.filters.hospitalId = String(state.doctorDetail?.hospital_id || "");
+  state.route = "doctor-detail";
+  history.replaceState({}, "", `/doctor/${doctorId}`);
+  closeMobileMenu();
+  render();
+}
+
 async function loadDoctorSlots(doctorId, date, options = {}) {
   const params = new URLSearchParams({ date });
   if (options.excludeAppointmentId) {
@@ -200,20 +363,43 @@ async function loadQueue() {
   );
 }
 
+function getAdminAppointmentQueryParams() {
+  const params = new URLSearchParams();
+  const filters = state.admin.appointmentFilters;
+  if (filters.date) params.set("date", filters.date);
+  if (filters.hospital) params.set("hospital", filters.hospital);
+  if (filters.doctor) params.set("doctor", filters.doctor);
+  if (filters.priority) params.set("priority", filters.priority);
+  if (filters.status) params.set("status", filters.status);
+  return params;
+}
+
+async function loadAdminAppointments() {
+  const params = getAdminAppointmentQueryParams();
+  state.admin.appointments = await apiFetch(
+    `/admin/appointments${params.toString() ? `?${params.toString()}` : ""}`,
+    {},
+    { silent: true }
+  );
+}
+
 async function loadAdminData() {
-  const [statsPayload, cities, hospitals, doctors, appointments] = await Promise.all([
+  const [statsPayload, cities, departments, hospitals, doctors, doctorLeaves] = await Promise.all([
     apiFetch("/admin/stats", {}, { silent: true }),
     apiFetch("/admin/cities", {}, { silent: true }),
+    apiFetch("/admin/departments", {}, { silent: true }),
     apiFetch("/admin/hospitals", {}, { silent: true }),
     apiFetch("/admin/doctors", {}, { silent: true }),
-    apiFetch("/admin/appointments", {}, { silent: true }),
+    apiFetch("/admin/doctor-leaves", {}, { silent: true }),
+    loadAdminAppointments(),
   ]);
   state.admin.stats = statsPayload.stats;
-  state.admin.chart = statsPayload.chart;
+  state.admin.charts = statsPayload.charts || state.admin.charts;
   state.admin.cities = cities;
+  state.admin.departments = departments;
   state.admin.hospitals = hospitals;
   state.admin.doctors = doctors;
-  state.admin.appointments = appointments;
+  state.admin.doctorLeaves = doctorLeaves;
 }
 
 async function loadAdminBoard() {
@@ -244,8 +430,8 @@ function configureAutoRefresh() {
       render();
     },
     "doctor-today": async () => {
-      if (!isAdmin() || !state.doctorDaily?.doctor_id) return;
-      await Promise.all([loadDoctorToday(state.doctorDaily.doctor_id), loadAdminData()]);
+      if (!isStaff() || !state.doctorDaily?.doctor_id) return;
+      await loadDoctorToday(state.doctorDaily.doctor_id);
       render();
     },
   };
@@ -259,6 +445,9 @@ function configureAutoRefresh() {
 }
 
 function render() {
+  if (state.route !== "admin") {
+    destroyAdminCharts();
+  }
   updateHeader();
   renderNav();
   configureAutoRefresh();
@@ -273,8 +462,12 @@ function render() {
 
   if (state.route === "cities") return renderCities();
   if (state.route === "hospitals") return renderHospitals();
+  if (state.route === "hospital-detail") return renderHospitalDetail();
   if (state.route === "doctors") return renderDoctors();
+  if (state.route === "doctor-detail") return renderDoctorDetail();
   if (state.route === "appointments") return renderAppointments();
+  if (state.route === "profile") return renderProfile();
+  if (state.route === "notifications") return renderNotifications();
   if (state.route === "confirmation") return renderConfirmation();
   if (state.route === "admin") return renderAdmin();
   if (state.route === "admin-board") return renderAdminBoard();
@@ -287,13 +480,19 @@ function updateHeader() {
   userChip.innerHTML = user
     ? `${user.photo ? `<img src="${user.photo}" alt="${escapeHtml(user.name)}" />` : ""}<div><strong>${escapeHtml(user.name)}</strong><div>${escapeHtml(user.role || "patient")}</div></div>`
     : '<div><strong>Guest</strong><div>Login required</div></div>';
+  userChip.classList.toggle("hidden", !user);
+  userChip.dataset.action = user ? "open-profile" : "";
 
   const titles = {
     home: ["Welcome", "Hospital Management System"],
     cities: ["Choose your city", "Find hospitals near you"],
     hospitals: ["Hospital directory", state.selectedCity?.name || "Hospitals"],
+    "hospital-detail": ["Hospital details", state.hospitalDetail?.name || "Hospital overview"],
     doctors: ["Doctor availability", state.selectedHospital?.name || "Doctor directory"],
+    "doctor-detail": ["Doctor profile", state.doctorDetail?.name || "Doctor details"],
     appointments: ["My bookings", "Upcoming and past appointments"],
+    profile: ["My profile", "Personal details and history"],
+    notifications: ["Notification center", "Booking updates"],
     confirmation: ["Booking confirmed", "Track your token live"],
     admin: ["Admin control room", "Operations dashboard"],
     "admin-board": ["Reception board", "Today's appointment board"],
@@ -307,13 +506,15 @@ function updateHeader() {
 function renderNav() {
   const items = state.session?.authenticated
     ? [
-        { id: "cities", label: "Cities", icon: "fa-city" },
-        { id: "hospitals", label: "Hospitals", icon: "fa-hospital", hidden: !state.selectedCity },
-        { id: "doctors", label: "Doctors", icon: "fa-user-doctor" },
-        { id: "appointments", label: "My Appointments", icon: "fa-notes-medical" },
-        { id: "confirmation", label: "My Queue", icon: "fa-ticket", hidden: !state.latestAppointment },
-        { id: "admin", label: "Admin Panel", icon: "fa-chart-line", hidden: !isAdmin() },
-        { id: "admin-board", label: "Today's Board", icon: "fa-tv", hidden: !isAdmin() },
+        { id: "cities", label: "Cities", icon: "fa-city", activeRoutes: ["cities"] },
+        { id: "hospitals", label: "Hospitals", icon: "fa-hospital", hidden: !state.selectedCity && !state.hospitalDetail, activeRoutes: ["hospitals", "hospital-detail"] },
+        { id: "doctors", label: "Doctors", icon: "fa-user-doctor", activeRoutes: ["doctors", "doctor-detail"] },
+        { id: "appointments", label: "My Appointments", icon: "fa-notes-medical", activeRoutes: ["appointments"] },
+        { id: "profile", label: "Profile", icon: "fa-id-card", activeRoutes: ["profile"] },
+        { id: "notifications", label: "Notifications", icon: "fa-bell", activeRoutes: ["notifications"], badge: state.notifications.unreadCount || 0 },
+        { id: "confirmation", label: "My Queue", icon: "fa-ticket", hidden: !state.latestAppointment, activeRoutes: ["confirmation"] },
+        { id: "admin", label: "Admin Panel", icon: "fa-chart-line", hidden: !isAdmin(), activeRoutes: ["admin"] },
+        { id: "admin-board", label: "Today's Board", icon: "fa-tv", hidden: !isAdmin(), activeRoutes: ["admin-board"] },
       ]
     : [];
 
@@ -321,15 +522,17 @@ function renderNav() {
     .filter((item) => !item.hidden)
     .map(
       (item) => `
-        <button class="nav-button ${state.route === item.id ? "active" : ""}" data-route="${item.id}" type="button">
+        <button class="nav-button ${(item.activeRoutes || [item.id]).includes(state.route) ? "active" : ""}" data-route="${item.id}" type="button">
           <i class="fa-solid ${item.icon}"></i>
           <span>${item.label}</span>
+          ${item.badge ? `<span class="nav-button__badge">${item.badge}</span>` : ""}
         </button>
       `
     )
     .join("");
 
   logoutButton.classList.toggle("hidden", !state.session?.authenticated);
+  updateInstallButtonVisibility();
 }
 
 function renderCities() {
@@ -419,9 +622,80 @@ function hospitalCards(hospitals) {
     .join("");
 }
 
+function renderHospitalDetail() {
+  if (!state.hospitalDetail) {
+    app.innerHTML = emptyState("Hospital details are not available.");
+    return;
+  }
+
+  const hospital = state.hospitalDetail;
+  app.innerHTML = `
+    <section class="page-grid">
+      <article class="hero-card hospital-hero">
+        <div class="detail-hero">
+          <div class="detail-hero__copy">
+            <p class="eyebrow">${escapeHtml(hospital.city_name || "Hospital")}</p>
+            <h3>${escapeHtml(hospital.name)}</h3>
+            <p>${escapeHtml(hospital.location || "Address will be updated soon.")}</p>
+            <div class="chip-row">
+              <span class="chip"><i class="fa-solid fa-hospital"></i>${hospital.doctor_count} doctors</span>
+              ${hospital.contact_phone ? `<span class="chip"><i class="fa-solid fa-phone"></i>${escapeHtml(hospital.contact_phone)}</span>` : ""}
+            </div>
+          </div>
+          <img class="detail-hero__media" src="${hospital.image || placeholderImage("hospital")}" alt="${escapeHtml(hospital.name)}" />
+        </div>
+        <div class="detail-grid">
+          <article class="list-card">
+            <p class="eyebrow">Address</p>
+            <h3>${escapeHtml(hospital.location || "Address unavailable")}</h3>
+            <p>${escapeHtml(hospital.city_name || "")}</p>
+          </article>
+          <article class="list-card">
+            <p class="eyebrow">Phone</p>
+            <h3>${escapeHtml(hospital.contact_phone || "Not available")}</h3>
+            <p>Call the front desk for assistance.</p>
+          </article>
+          <article class="list-card">
+            <p class="eyebrow">Map</p>
+            <h3>${hospital.map_link ? "Directions ready" : "Map pending"}</h3>
+            <div class="form-actions">
+              ${hospital.map_link ? `<a class="primary-button link-button" href="${escapeAttribute(hospital.map_link)}" target="_blank" rel="noreferrer"><i class="fa-solid fa-map-location-dot"></i><span>Open map</span></a>` : "<span class='table-subtext'>Map link will be added soon.</span>"}
+            </div>
+          </article>
+        </div>
+      </article>
+      <article class="table-card">
+        <div class="section-header">
+          <div>
+            <p class="eyebrow">Doctors list</p>
+            <h3>Book directly from this hospital</h3>
+            <p>Browse the hospital roster, open doctor profiles, or reserve a slot right here.</p>
+          </div>
+          <div class="form-actions">
+            <button class="secondary-button" type="button" data-action="open-hospital-directory" data-hospital-id="${hospital.id}">
+              <i class="fa-solid fa-table-cells-large"></i>
+              <span>Directory View</span>
+            </button>
+          </div>
+        </div>
+        <div class="cards-grid">
+          ${hospital.doctors?.length ? doctorCards(hospital.doctors) : emptyState("No doctors are assigned to this hospital yet.")}
+        </div>
+      </article>
+    </section>
+  `;
+}
+
 function renderDoctors() {
-  const displayedDoctors = state.doctorDirectory.length ? state.doctorDirectory : state.doctors;
-  const sourceDoctors = state.doctorDirectory.length ? state.doctorDirectory : state.doctors;
+  const sourceDoctors = shouldUseFilteredDoctorDirectory() ? state.doctorDirectory : state.doctors;
+  const displayedDoctors = sourceDoctors;
+  const departmentOptions = [
+    ...new Map(
+      sourceDoctors
+        .filter((doctor) => doctor.department_id && doctor.department_name)
+        .map((doctor) => [String(doctor.department_id), { id: doctor.department_id, name: doctor.department_name }])
+    ).values(),
+  ].sort((left, right) => String(left.name).localeCompare(String(right.name)));
   const specializationOptions = [...new Set(sourceDoctors.map((doctor) => doctor.specialization).filter(Boolean))].sort();
   const hospitalOptions = getCurrentHospitalOptions();
 
@@ -444,6 +718,10 @@ function renderDoctors() {
           <select id="doctorHospitalFilter" aria-label="Filter doctors by hospital">
             <option value="">All hospitals</option>
             ${hospitalOptions.map((hospital) => `<option value="${hospital.id}" ${String(state.filters.hospitalId) === String(hospital.id) ? "selected" : ""}>${escapeHtml(hospital.name)}</option>`).join("")}
+          </select>
+          <select id="doctorDepartmentFilter" aria-label="Filter doctors by department">
+            <option value="">All departments</option>
+            ${departmentOptions.map((item) => `<option value="${item.id}" ${String(state.filters.departmentId) === String(item.id) ? "selected" : ""}>${escapeHtml(item.name)}</option>`).join("")}
           </select>
           <select id="doctorSpecializationFilter" aria-label="Filter doctors by specialization">
             <option value="">All specializations</option>
@@ -473,14 +751,21 @@ function doctorCards(doctors) {
         <article class="card">
           <img class="card__media" src="${doctor.image || placeholderImage("doctor")}" alt="${escapeHtml(doctor.name)}" />
           <div class="chip-row">
+            ${doctor.department_name ? `<span class="chip"><i class="fa-solid fa-building-user"></i>${escapeHtml(doctor.department_name)}</span>` : ""}
             <span class="chip"><i class="fa-solid fa-stethoscope"></i>${escapeHtml(doctor.specialization)}</span>
-            <span class="chip"><i class="fa-solid fa-users"></i>${doctor.booked_patients} booked today</span>
+            <span class="chip"><i class="fa-solid fa-users"></i>${doctor.booked_patients}/${doctor.max_patients_per_day || "?"} booked today</span>
             ${doctor.unavailable_days ? `<span class="chip"><i class="fa-solid fa-calendar-xmark"></i>${escapeHtml(formatUnavailableDays(doctor.unavailable_days))}</span>` : ""}
           </div>
           <h3>${escapeHtml(doctor.name)}</h3>
           <p class="card__meta"><i class="fa-regular fa-clock"></i> ${formatTimeRange(doctor.available_from, doctor.available_to)}</p>
           <p class="card__meta"><i class="fa-solid fa-hospital"></i> ${escapeHtml(doctor.hospital_name)}${doctor.city_name ? ` • ${escapeHtml(doctor.city_name)}` : ""}</p>
           ${doctor.availability_note ? `<p class="card__meta"><i class="fa-solid fa-circle-info"></i> ${escapeHtml(doctor.availability_note)}</p>` : ""}
+          ${
+            Number(doctor.max_patients_per_day || 0) > 0 &&
+            Number(doctor.booked_patients || 0) >= Number(doctor.max_patients_per_day || 0)
+              ? `<p class="card__meta"><i class="fa-solid fa-triangle-exclamation"></i> Daily limit reached for this doctor.</p>`
+              : ""
+          }
           <div class="help-strip">
             <span><i class="fa-solid fa-location-dot"></i> ${escapeHtml(doctor.hospital_location || "Location not available")}</span>
             ${doctor.hospital_contact_phone ? `<span><i class="fa-solid fa-phone"></i> ${escapeHtml(doctor.hospital_contact_phone)}</span>` : ""}
@@ -491,6 +776,18 @@ function doctorCards(doctors) {
               <i class="fa-${doctor.is_favorite ? "solid" : "regular"} fa-star"></i>
               <span>${doctor.is_favorite ? "Saved doctor" : "Save doctor"}</span>
             </button>
+            <button class="ghost-button" data-action="open-doctor-detail" data-doctor-id="${doctor.id}" type="button">
+              <i class="fa-solid fa-id-badge"></i>
+              <span>View Profile</span>
+            </button>
+            ${
+              isStaff()
+                ? `<button class="ghost-button" data-action="open-doctor-today" data-doctor-id="${doctor.id}" type="button">
+                    <i class="fa-solid fa-clipboard-list"></i>
+                    <span>Today's Queue</span>
+                  </button>`
+                : ""
+            }
           </div>
           <form class="form-card compact-form" data-form="book-appointment">
             <input type="hidden" name="doctor_id" value="${doctor.id}" />
@@ -501,8 +798,14 @@ function doctorCards(doctors) {
               <select aria-label="Book for self or family member" name="family_member_id">
                 ${renderFamilyMemberOptions()}
               </select>
-              <input aria-label="Appointment date" class="full" name="date" type="date" min="${todayDate()}" required />
+              <select aria-label="Visit priority" name="priority">
+                <option value="normal" selected>Normal priority</option>
+                <option value="emergency">Emergency priority</option>
+              </select>
+              <input aria-label="Appointment date" name="date" type="date" min="${todayDate()}" required />
+              <textarea aria-label="Reason for visit" class="full" name="reason_for_visit" placeholder="Reason for visit" rows="3" required></textarea>
             </div>
+            <p class="card__meta"><i class="fa-solid fa-truck-medical"></i> Emergency bookings move ahead in the queue even if the token number is higher.</p>
             <p class="card__meta" data-slot-preview>Next free slot will be assigned automatically after you choose a date.</p>
             <p class="card__meta">Reminder email will be sent to ${escapeHtml(state.session.user.email || "your account")} before the appointment.</p>
             <p class="form-feedback" aria-live="polite"></p>
@@ -517,6 +820,78 @@ function doctorCards(doctors) {
       `
     )
     .join("");
+}
+
+function renderDoctorDetail() {
+  if (!state.doctorDetail) {
+    app.innerHTML = emptyState("Doctor details are not available.");
+    return;
+  }
+
+  const doctor = state.doctorDetail;
+  app.innerHTML = `
+    <section class="page-grid">
+      <article class="hero-card doctor-hero">
+        <div class="detail-hero">
+          <div class="detail-hero__copy">
+            <p class="eyebrow">${escapeHtml(doctor.department_name || "Doctor profile")}</p>
+            <h3>${escapeHtml(doctor.name)}</h3>
+            <p>${escapeHtml(doctor.specialization || "Specialization will be updated soon.")}</p>
+            <div class="chip-row">
+              <span class="chip"><i class="fa-solid fa-hospital"></i>${escapeHtml(doctor.hospital_name)}</span>
+              <span class="chip"><i class="fa-regular fa-clock"></i>${formatTimeRange(doctor.available_from, doctor.available_to)}</span>
+              <span class="chip"><i class="fa-solid fa-users"></i>${doctor.booked_patients}/${doctor.max_patients_per_day || "?"} booked today</span>
+            </div>
+          </div>
+          <img class="detail-hero__media" src="${doctor.image || placeholderImage("doctor")}" alt="${escapeHtml(doctor.name)}" />
+        </div>
+      </article>
+      <div class="stat-grid">
+        <article class="stat-card"><p class="eyebrow">Specialization</p><strong>${escapeHtml(doctor.specialization || "N/A")}</strong><span>${escapeHtml(doctor.department_name || "Department pending")}</span></article>
+        <article class="stat-card"><p class="eyebrow">Schedule</p><strong>${escapeHtml(formatTimeRange(doctor.available_from, doctor.available_to))}</strong><span>${escapeHtml(doctor.unavailable_days ? `Off: ${formatUnavailableDays(doctor.unavailable_days)}` : "Available all week")}</span></article>
+        <article class="stat-card"><p class="eyebrow">Total bookings</p><strong>${doctor.total_bookings || 0}</strong><span>${doctor.completed_bookings || 0} completed</span></article>
+        <article class="stat-card"><p class="eyebrow">Upcoming queue</p><strong>${doctor.upcoming_bookings || 0}</strong><span>${doctor.cancelled_bookings || 0} cancelled</span></article>
+      </div>
+      <div class="detail-grid">
+        <article class="list-card">
+          <p class="eyebrow">Hospital</p>
+          <h3>${escapeHtml(doctor.hospital_name)}</h3>
+          <p>${escapeHtml(doctor.hospital_location || "Location not available")}</p>
+          <div class="help-strip">
+            ${doctor.hospital_contact_phone ? `<span><i class="fa-solid fa-phone"></i> ${escapeHtml(doctor.hospital_contact_phone)}</span>` : ""}
+            ${doctor.hospital_map_link ? `<a href="${escapeAttribute(doctor.hospital_map_link)}" target="_blank" rel="noreferrer">Open hospital map</a>` : ""}
+          </div>
+        </article>
+        <article class="form-card">
+          <p class="eyebrow">Book this doctor</p>
+          <h3>Reserve a consultation slot</h3>
+          <form class="compact-form" data-form="book-appointment">
+            <input type="hidden" name="doctor_id" value="${doctor.id}" />
+            <input type="hidden" name="hospital_id" value="${doctor.hospital_id}" />
+            <div class="form-grid">
+              <input aria-label="Patient name" name="name" type="text" placeholder="Patient name" value="${escapeHtml(state.session?.user?.name || "")}" required />
+              <input aria-label="Mobile number" name="mobile" type="tel" placeholder="10-digit mobile" value="${escapeHtml(state.profile?.user?.phone || state.session?.user?.phone || "")}" required />
+              <select aria-label="Book for self or family member" name="family_member_id">
+                ${renderFamilyMemberOptions()}
+              </select>
+              <select aria-label="Visit priority" name="priority">
+                <option value="normal" selected>Normal priority</option>
+                <option value="emergency">Emergency priority</option>
+              </select>
+              <input aria-label="Appointment date" name="date" type="date" min="${todayDate()}" required />
+              <textarea aria-label="Reason for visit" class="full" name="reason_for_visit" placeholder="Reason for visit" rows="3" required></textarea>
+            </div>
+            <p class="card__meta" data-slot-preview>Next free slot will be assigned automatically after you choose a date.</p>
+            <p class="form-feedback" aria-live="polite"></p>
+            <div class="form-actions">
+              <button class="primary-button" type="submit"><i class="fa-solid fa-calendar-check"></i><span>Book Appointment</span></button>
+              <button class="ghost-button" type="button" data-action="open-hospital-detail" data-hospital-id="${doctor.hospital_id}"><i class="fa-solid fa-hospital"></i><span>Hospital Details</span></button>
+            </div>
+          </form>
+        </article>
+      </div>
+    </section>
+  `;
 }
 
 async function renderAppointments() {
@@ -582,6 +957,101 @@ async function renderAppointments() {
   `;
 }
 
+async function renderProfile() {
+  if (!state.profile) {
+    app.innerHTML = emptyState("Profile data is not available.");
+    return;
+  }
+
+  const profile = state.profile;
+  app.innerHTML = `
+    <section class="page-grid">
+      <div class="stat-grid">
+        <article class="stat-card"><p class="eyebrow">Name</p><strong>${escapeHtml(profile.user?.name || state.session?.user?.name || "")}</strong><span>${escapeHtml(profile.user?.email || "")}</span></article>
+        <article class="stat-card"><p class="eyebrow">Phone</p><strong>${escapeHtml(profile.user?.phone || "Add your phone")}</strong><span>Used for booking contact</span></article>
+        <article class="stat-card"><p class="eyebrow">Upcoming</p><strong>${profile.stats?.upcoming_appointments || 0}</strong><span>${profile.stats?.total_appointments || 0} total appointments</span></article>
+        <article class="stat-card"><p class="eyebrow">Completed</p><strong>${profile.stats?.completed_appointments || 0}</strong><span>${profile.stats?.cancelled_appointments || 0} cancelled</span></article>
+      </div>
+      <article class="form-card">
+        <p class="eyebrow">Profile details</p>
+        <h3>Update your contact information</h3>
+        <form data-form="profile-form">
+          <div class="form-grid">
+            <input name="name" type="text" value="${escapeHtml(profile.user?.name || "")}" placeholder="Your name" required />
+            <input name="phone" type="tel" value="${escapeHtml(profile.user?.phone || "")}" placeholder="Phone number" />
+          </div>
+          <p class="form-feedback" aria-live="polite"></p>
+          <div class="form-actions">
+            <button class="primary-button" type="submit"><i class="fa-solid fa-floppy-disk"></i><span>Save Profile</span></button>
+          </div>
+        </form>
+      </article>
+      <article class="table-card">
+        <div class="section-header">
+          <div>
+            <p class="eyebrow">Appointment history</p>
+            <h3>Upcoming appointments</h3>
+          </div>
+        </div>
+        ${appointmentHistoryCards(state.myAppointments.upcoming, true)}
+      </article>
+      <article class="table-card">
+        <div class="section-header">
+          <div>
+            <p class="eyebrow">Past visits</p>
+            <h3>Completed and cancelled appointments</h3>
+          </div>
+        </div>
+        ${appointmentHistoryCards(state.myAppointments.past, false)}
+      </article>
+    </section>
+  `;
+}
+
+function renderNotifications() {
+  const items = state.notifications.items || [];
+  app.innerHTML = `
+    <section class="page-grid">
+      <article class="table-card">
+        <div class="section-header">
+          <div>
+            <p class="eyebrow">Notification center</p>
+            <h3>Booking updates</h3>
+            <p>Track new bookings, cancellations, and reschedules from one place.</p>
+          </div>
+          <div class="chip-row">
+            <span class="chip"><i class="fa-solid fa-bell"></i>${state.notifications.unreadCount || 0} unread</span>
+            <button class="secondary-button" type="button" data-action="refresh-notifications"><i class="fa-solid fa-rotate"></i><span>Refresh</span></button>
+          </div>
+        </div>
+        ${
+          items.length
+            ? `<div class="notification-list">
+                ${items
+                  .map(
+                    (item) => `
+                      <article class="list-card notification-card ${item.is_read ? "" : "notification-card--unread"}">
+                        <div class="section-header">
+                          <div>
+                            <p class="eyebrow">${escapeHtml(formatNotificationType(item.type))}</p>
+                            <h3>${escapeHtml(item.title)}</h3>
+                          </div>
+                          ${item.is_read ? '<span class="chip">Read</span>' : '<span class="chip"><i class="fa-solid fa-sparkles"></i>New</span>'}
+                        </div>
+                        <p>${escapeHtml(item.message)}</p>
+                        <p class="card__meta"><i class="fa-regular fa-clock"></i>${escapeHtml(formatDateTime(item.created_at))}</p>
+                      </article>
+                    `
+                  )
+                  .join("")}
+              </div>`
+            : emptyState("No notifications yet. Booking activity will appear here.")
+        }
+      </article>
+    </section>
+  `;
+}
+
 function appointmentHistoryCards(items, active) {
   if (!items.length) {
     return emptyState(active ? "No upcoming appointments yet. Book a doctor to see your active bookings here." : "No past appointments available yet.");
@@ -600,9 +1070,15 @@ function appointmentHistoryCards(items, active) {
                 </div>
                 ${statusBadge(appointment.status)}
               </div>
+              <div class="chip-row">
+                ${appointment.department_name ? `<span class="chip"><i class="fa-solid fa-building-user"></i>${escapeHtml(appointment.department_name)}</span>` : ""}
+                ${priorityBadge(appointment.priority)}
+              </div>
               <p class="card__meta"><i class="fa-solid fa-stethoscope"></i> ${escapeHtml(appointment.specialization || "")}</p>
               <p class="card__meta"><i class="fa-solid fa-calendar-day"></i> ${formatDate(appointment.appointment_date)} • Token ${appointment.token_number}</p>
               <p class="card__meta"><i class="fa-regular fa-clock"></i> ${escapeHtml(formatAppointmentSlot(appointment))}</p>
+              ${appointment.reason_for_visit ? `<p class="card__meta"><i class="fa-solid fa-notes-medical"></i> ${escapeHtml(appointment.reason_for_visit)}</p>` : ""}
+              ${appointment.visit_notes ? `<p class="card__meta"><i class="fa-solid fa-file-waveform"></i> ${escapeHtml(appointment.visit_notes)}</p>` : ""}
               ${appointment.family_member_name ? `<p class="card__meta"><i class="fa-solid fa-people-group"></i> Booked for ${escapeHtml(appointment.family_member_name)}${appointment.family_relation ? ` • ${escapeHtml(appointment.family_relation)}` : ""}</p>` : ""}
               <p class="card__meta"><i class="fa-solid fa-location-dot"></i> ${escapeHtml(appointment.hospital_location || "")}</p>
               <div class="help-strip">
@@ -664,6 +1140,7 @@ function renderFavoritesSection() {
                   <article class="list-card history-card">
                     <p class="eyebrow">Favorite doctor</p>
                     <h3>${escapeHtml(doctor.name)}</h3>
+                    ${doctor.department_name ? `<div class="chip-row"><span class="chip"><i class="fa-solid fa-building-user"></i>${escapeHtml(doctor.department_name)}</span></div>` : ""}
                     <p class="card__meta"><i class="fa-solid fa-stethoscope"></i> ${escapeHtml(doctor.specialization || "")}</p>
                     <p class="card__meta"><i class="fa-solid fa-hospital"></i> ${escapeHtml(doctor.hospital_name)}${doctor.city_name ? ` • ${escapeHtml(doctor.city_name)}` : ""}</p>
                     <div class="form-actions">
@@ -733,13 +1210,13 @@ async function renderConfirmation() {
     <section class="page-grid">
       <div class="stat-grid">
         <article class="stat-card"><p class="eyebrow">Hospital</p><strong>${escapeHtml(appointment.hospital_name)}</strong><span>${escapeHtml(appointment.hospital_location)}</span></article>
-        <article class="stat-card"><p class="eyebrow">Doctor</p><strong>${escapeHtml(appointment.doctor_name)}</strong><span>${escapeHtml(appointment.specialization || "")}</span></article>
+        <article class="stat-card"><p class="eyebrow">Doctor</p><strong>${escapeHtml(appointment.doctor_name)}</strong><span>${escapeHtml(appointment.department_name || appointment.specialization || "")}</span></article>
         <article class="stat-card"><p class="eyebrow">Appointment date</p><strong>${formatDate(appointment.appointment_date)}</strong><span>Token ${appointment.token_number}</span></article>
-        <article class="stat-card"><p class="eyebrow">Appointment slot</p><strong>${escapeHtml(formatAppointmentSlot(appointment))}</strong><span>Selected fixed slot for this doctor</span></article>
+        <article class="stat-card"><p class="eyebrow">Priority</p><strong>${escapeHtml(formatPriorityLabel(appointment.priority))}</strong><span>${escapeHtml(formatAppointmentSlot(appointment))}</span></article>
       </div>
       <article class="queue-card">
         <div class="section-header">
-          <div><p class="eyebrow">Booking confirmation</p><h3>Your token is reserved</h3><p>${appointment.patients_before} patients were ahead when you booked.</p></div>
+          <div><p class="eyebrow">Booking confirmation</p><h3>Your token is reserved</h3><p>${appointment.patients_before} patients were ahead when you booked.${normalizePriority(appointment.priority) === "emergency" ? " Emergency priority moves you ahead of normal tokens in the live queue." : ""}</p></div>
           <div class="form-actions">
             <button class="ghost-button" type="button" data-action="refresh-queue"><i class="fa-solid fa-rotate"></i><span>Refresh Queue</span></button>
             <button class="secondary-button" type="button" data-action="print-current-slip"><i class="fa-solid fa-print"></i><span>Print Slip</span></button>
@@ -751,8 +1228,15 @@ async function renderConfirmation() {
           </div>
         </div>
         <div class="detail-grid">
-          <div class="list-card"><p class="eyebrow">Patient</p><h3>${escapeHtml(appointment.user_name)}</h3><p>${escapeHtml(appointment.mobile)}</p>${appointment.family_member_name ? `<p class="card__meta"><i class="fa-solid fa-people-group"></i>${escapeHtml(appointment.family_member_name)}${appointment.family_relation ? ` • ${escapeHtml(appointment.family_relation)}` : ""}</p>` : ""}</div>
-          <div class="list-card"><p class="eyebrow">Token number</p><div class="queue-pill">${appointment.token_number}</div>${statusBadge(appointment.status)}</div>
+          <div class="list-card">
+            <p class="eyebrow">Patient</p>
+            <h3>${escapeHtml(appointment.user_name)}</h3>
+            <p>${escapeHtml(appointment.mobile)}</p>
+            ${appointment.family_member_name ? `<p class="card__meta"><i class="fa-solid fa-people-group"></i>${escapeHtml(appointment.family_member_name)}${appointment.family_relation ? ` • ${escapeHtml(appointment.family_relation)}` : ""}</p>` : ""}
+            ${appointment.reason_for_visit ? `<p class="card__meta"><i class="fa-solid fa-notes-medical"></i> ${escapeHtml(appointment.reason_for_visit)}</p>` : ""}
+            ${appointment.visit_notes ? `<p class="card__meta"><i class="fa-solid fa-file-waveform"></i> ${escapeHtml(appointment.visit_notes)}</p>` : ""}
+          </div>
+          <div class="list-card"><p class="eyebrow">Token number</p><div class="queue-pill">${appointment.token_number}</div><div class="chip-row">${priorityBadge(appointment.priority)}${statusBadge(appointment.status)}</div></div>
         </div>
       </article>
       <article class="queue-card">
@@ -802,8 +1286,8 @@ function renderAdmin() {
             </form>
           </article>
           <article class="form-card">
-            <p class="eyebrow">Add hospital</p><h3>Register a new hospital</h3>
-            <form data-form="add-hospital">
+            <p class="eyebrow">Hospital management</p><h3>${state.editingHospitalId ? "Edit hospital" : "Register a new hospital"}</h3>
+            <form data-form="hospital-form">
               <div class="form-grid">
                 <input name="name" type="text" placeholder="Hospital name" required />
                 <select name="city_id" required><option value="">Select city</option>${state.admin.cities.map((city) => `<option value="${city.id}">${escapeHtml(city.name)}</option>`).join("")}</select>
@@ -813,7 +1297,10 @@ function renderAdmin() {
                 <input name="map_link" type="url" placeholder="Google Maps link" />
               </div>
               <p class="form-feedback" aria-live="polite"></p>
-              <div class="form-actions"><button class="primary-button" type="submit"><i class="fa-solid fa-plus"></i><span>Add Hospital</span></button></div>
+              <div class="form-actions">
+                <button class="primary-button" type="submit"><i class="fa-solid ${state.editingHospitalId ? "fa-pen" : "fa-plus"}"></i><span>${state.editingHospitalId ? "Update Hospital" : "Add Hospital"}</span></button>
+                ${state.editingHospitalId ? '<button class="ghost-button" type="button" data-action="cancel-hospital-edit">Cancel Edit</button>' : ""}
+              </div>
             </form>
           </article>
           <article class="form-card">
@@ -822,8 +1309,10 @@ function renderAdmin() {
               <div class="form-grid">
                 <input name="name" type="text" placeholder="Doctor name" required />
                 <input name="specialization" type="text" placeholder="Specialization" required />
+                <select name="department_id" required><option value="">Select department</option>${state.admin.departments.map((department) => `<option value="${department.id}">${escapeHtml(department.name)}</option>`).join("")}</select>
                 <select name="hospital_id" required><option value="">Select hospital</option>${state.admin.hospitals.map((hospital) => `<option value="${hospital.id}">${escapeHtml(hospital.name)} • ${escapeHtml(hospital.city_name)}</option>`).join("")}</select>
                 <input name="image" type="url" placeholder="Image URL" />
+                <input name="max_patients_per_day" type="number" min="1" placeholder="Max patients per day" required />
                 <select name="available_from" required><option value="">Start time</option>${renderTimeOptions()}</select>
                 <select name="available_to" required><option value="">End time</option>${renderTimeOptions()}</select>
                 <select class="full" name="unavailable_days" multiple size="4">${renderDayOptions()}</select>
@@ -837,11 +1326,36 @@ function renderAdmin() {
               </div>
             </form>
           </article>
+          <article class="form-card">
+            <p class="eyebrow">Doctor leave system</p><h3>Block leave dates from booking</h3>
+            <form data-form="doctor-leave-form">
+              <div class="form-grid">
+                <select name="doctor_id" required>
+                  <option value="">Select doctor</option>
+                  ${state.admin.doctors.map((doctor) => `<option value="${doctor.id}">${escapeHtml(doctor.name)} • ${escapeHtml(doctor.hospital_name)}</option>`).join("")}
+                </select>
+                <input name="leave_date" type="date" min="${todayDate()}" required />
+                <input class="full" name="reason" type="text" placeholder="Reason for leave" />
+              </div>
+              <p class="form-feedback" aria-live="polite"></p>
+              <div class="form-actions"><button class="primary-button" type="submit"><i class="fa-solid fa-calendar-xmark"></i><span>Save Leave</span></button></div>
+            </form>
+          </article>
         </div>
-        <article class="chart-card">
-          <p class="eyebrow">Appointment trend</p><h3>Top hospitals by bookings</h3>
-          <div class="chart-bars">${chartBars()}</div>
-        </article>
+        <div class="admin-stack">
+          <article class="chart-card">
+            <p class="eyebrow">Bookings per day</p><h3>Last 14 days</h3>
+            <div class="chart-canvas-wrap"><canvas id="bookingsPerDayChart"></canvas></div>
+          </article>
+          <article class="chart-card">
+            <p class="eyebrow">Top doctors</p><h3>Most booked doctors</h3>
+            <div class="chart-canvas-wrap"><canvas id="topDoctorsChart"></canvas></div>
+          </article>
+          <article class="chart-card">
+            <p class="eyebrow">Top hospitals</p><h3>Most booked hospitals</h3>
+            <div class="chart-canvas-wrap"><canvas id="topHospitalsChart"></canvas></div>
+          </article>
+        </div>
       </div>
       <article class="table-card">
         <div class="section-header"><div><p class="eyebrow">Manage hospitals</p><h3>Hospital directory</h3></div></div>
@@ -852,11 +1366,18 @@ function renderAdmin() {
         ${doctorsTable()}
       </article>
       <article class="table-card">
-        <div class="section-header"><div><p class="eyebrow">Appointments</p><h3>Visible appointment table</h3><p>See patient, hospital, doctor, date, token, and status together.</p></div></div>
+        <div class="section-header"><div><p class="eyebrow">Appointments</p><h3>Visible appointment table</h3><p>Track department, priority, reason for visit, and post-visit notes in one place.</p></div></div>
         ${appointmentsTable()}
+      </article>
+      <article class="table-card">
+        <div class="section-header"><div><p class="eyebrow">Doctor leaves</p><h3>Upcoming leave records</h3><p>These dates are blocked for patient booking and rescheduling.</p></div></div>
+        ${doctorLeavesTable()}
       </article>
     </section>
   `;
+  destroyAdminCharts();
+  renderAdminCharts();
+  if (state.editingHospitalId) fillHospitalForm();
   if (state.editingDoctorId) fillDoctorForm();
 }
 
@@ -884,19 +1405,20 @@ function renderBoardCard(doctor) {
         <div>
           <p class="eyebrow">${escapeHtml(doctor.hospital_name)}</p>
           <h3>${escapeHtml(doctor.doctor_name)}</h3>
-          <p>${escapeHtml(doctor.specialization || "")}</p>
+          <p>${escapeHtml(doctor.department_name || doctor.specialization || "")}</p>
         </div>
         <div class="queue-pill">${doctor.now_serving ?? "No queue"}</div>
       </div>
       <p class="card__meta"><strong>Now Serving:</strong> ${doctor.now_serving ?? "Not started"}</p>
       ${doctor.appointments.length ? `
         <table class="compact-table">
-          <thead><tr><th>Token</th><th>Patient</th><th>Status</th></tr></thead>
+          <thead><tr><th>Token</th><th>Patient</th><th>Priority</th><th>Status</th></tr></thead>
           <tbody>
             ${doctor.appointments.map((item) => `
               <tr>
                 <td>${item.token_number}</td>
-                <td>${escapeHtml(item.user_name)}</td>
+                <td>${escapeHtml(item.user_name)}${item.reason_for_visit ? `<br><span class="table-subtext">${escapeHtml(item.reason_for_visit)}</span>` : ""}</td>
+                <td>${priorityBadge(item.priority)}</td>
                 <td>${statusBadge(item.status)}</td>
               </tr>
             `).join("")}
@@ -919,7 +1441,7 @@ function renderDoctorToday() {
         <div>
           <p class="eyebrow">${escapeHtml(state.doctorDaily.hospital_name)}</p>
           <h3>${escapeHtml(state.doctorDaily.doctor_name)}</h3>
-          <p>${escapeHtml(state.doctorDaily.specialization || "")}</p>
+          <p>${escapeHtml(state.doctorDaily.department_name || state.doctorDaily.specialization || "")}</p>
         </div>
         <div class="queue-pill">${state.doctorDaily.now_serving ?? "No queue"}</div>
       </div>
@@ -927,7 +1449,7 @@ function renderDoctorToday() {
         <div class="section-header">
           <div>
             <p class="eyebrow">Today's patients</p>
-            <h3>Sorted by token</h3>
+            <h3>Emergency-first queue</h3>
             <p>Quick OPD workflow for this doctor.</p>
           </div>
         </div>
@@ -937,19 +1459,78 @@ function renderDoctorToday() {
   `;
 }
 
-function chartBars() {
-  if (!state.admin.chart.length) return emptyState("No appointment data available yet.");
-  const max = Math.max(...state.admin.chart.map((item) => item.bookings), 1);
-  return state.admin.chart
-    .map(
-      (item) => `
-        <div class="bar-row">
-          <div class="card__meta"><strong>${escapeHtml(item.name)}</strong><span>${item.bookings} bookings</span></div>
-          <div class="bar-track"><div class="bar-fill" style="width:${(item.bookings / max) * 100}%"></div></div>
-        </div>
-      `
-    )
-    .join("");
+function destroyAdminCharts() {
+  adminCharts.forEach((chart) => chart.destroy());
+  adminCharts = [];
+}
+
+function renderAdminCharts() {
+  if (typeof Chart === "undefined") return;
+
+  const chartConfigs = [
+    {
+      id: "bookingsPerDayChart",
+      type: "line",
+      data: state.admin.charts.bookingsPerDay || [],
+      datasetLabel: "Bookings",
+      borderColor: "#f97316",
+      backgroundColor: "rgba(249, 115, 22, 0.18)",
+    },
+    {
+      id: "topDoctorsChart",
+      type: "bar",
+      data: state.admin.charts.topDoctors || [],
+      datasetLabel: "Bookings",
+      borderColor: "#14b8a6",
+      backgroundColor: "rgba(20, 184, 166, 0.35)",
+    },
+    {
+      id: "topHospitalsChart",
+      type: "bar",
+      data: state.admin.charts.topHospitals || [],
+      datasetLabel: "Bookings",
+      borderColor: "#3b82f6",
+      backgroundColor: "rgba(59, 130, 246, 0.35)",
+    },
+  ];
+
+  chartConfigs.forEach((config) => {
+    const canvas = document.getElementById(config.id);
+    if (!canvas || !config.data.length) return;
+
+    adminCharts.push(
+      new Chart(canvas, {
+        type: config.type,
+        data: {
+          labels: config.data.map((item) => item.label),
+          datasets: [
+            {
+              label: config.datasetLabel,
+              data: config.data.map((item) => item.value),
+              borderColor: config.borderColor,
+              backgroundColor: config.backgroundColor,
+              fill: config.type === "line",
+              tension: 0.3,
+              borderWidth: 2,
+            },
+          ],
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: {
+            legend: { display: false },
+          },
+          scales: {
+            y: {
+              beginAtZero: true,
+              ticks: { precision: 0 },
+            },
+          },
+        },
+      })
+    );
+  });
 }
 
 function hospitalsTable() {
@@ -966,7 +1547,39 @@ function hospitalsTable() {
                 <td>${escapeHtml(hospital.city_name)}</td>
                 <td>${escapeHtml(hospital.location)}${hospital.contact_phone ? `<br><span class="table-subtext">${escapeHtml(hospital.contact_phone)}</span>` : ""}</td>
                 <td>${hospital.doctor_count}</td>
-                <td class="table-actions"><button class="danger-button" data-action="delete-hospital" data-id="${hospital.id}" type="button">Delete</button></td>
+                <td class="table-actions">
+                  <button class="ghost-button" data-action="edit-hospital" data-id="${hospital.id}" type="button">Edit</button>
+                  <button class="danger-button" data-action="delete-hospital" data-id="${hospital.id}" type="button">Delete</button>
+                </td>
+              </tr>
+            `
+          )
+          .join("")}
+      </tbody>
+    </table>
+  `;
+}
+
+function doctorLeavesTable() {
+  if (!state.admin.doctorLeaves.length) {
+    return emptyState("No doctor leave records available.");
+  }
+
+  return `
+    <table>
+      <thead><tr><th>Date</th><th>Doctor</th><th>Hospital</th><th>Reason</th><th>Action</th></tr></thead>
+      <tbody>
+        ${state.admin.doctorLeaves
+          .map(
+            (leave) => `
+              <tr>
+                <td>${formatDate(leave.leave_date)}</td>
+                <td>${escapeHtml(leave.doctor_name)}${leave.specialization ? `<br><span class="table-subtext">${escapeHtml(leave.specialization)}</span>` : ""}</td>
+                <td>${escapeHtml(leave.hospital_name)}</td>
+                <td>${escapeHtml(leave.reason || "Doctor unavailable")}</td>
+                <td class="table-actions">
+                  <button class="danger-button" data-action="delete-doctor-leave" data-id="${leave.id}" type="button">Delete</button>
+                </td>
               </tr>
             `
           )
@@ -980,16 +1593,17 @@ function doctorsTable() {
   if (!state.admin.doctors.length) return emptyState("No doctors available.");
   return `
     <table>
-      <thead><tr><th>Name</th><th>Specialization</th><th>Hospital</th><th>Time</th><th>Availability</th><th>Action</th></tr></thead>
+      <thead><tr><th>Name</th><th>Department</th><th>Hospital</th><th>Time</th><th>Capacity</th><th>Availability</th><th>Action</th></tr></thead>
       <tbody>
         ${state.admin.doctors
           .map(
             (doctor) => `
               <tr>
                 <td>${escapeHtml(doctor.name)}</td>
-                <td>${escapeHtml(doctor.specialization)}</td>
+                <td>${escapeHtml(doctor.department_name || "Unassigned")}<br><span class="table-subtext">${escapeHtml(doctor.specialization)}</span></td>
                 <td>${escapeHtml(doctor.hospital_name)}</td>
                 <td>${formatTimeRange(doctor.available_from, doctor.available_to)}</td>
+                <td>${escapeHtml(String(doctor.max_patients_per_day || ""))} / day</td>
                 <td>${escapeHtml(formatAvailabilitySummary(doctor))}</td>
                 <td class="table-actions">
                   <button class="ghost-button" data-action="edit-doctor" data-id="${doctor.id}" type="button">Edit</button>
@@ -1006,19 +1620,23 @@ function doctorsTable() {
 
 function appointmentsTable() {
   const filteredAppointments = getFilteredAdminAppointments();
-  const hospitals = [...new Set(state.admin.appointments.map((item) => item.hospital_name))].sort();
-  const doctors = [...new Set(state.admin.appointments.map((item) => item.doctor_name))].sort();
+  const hospitals = state.admin.hospitals;
+  const doctors = state.admin.doctors;
 
   return `
     <div class="search-row table-toolbar">
       <input id="adminAppointmentDateFilter" type="date" value="${escapeHtml(state.admin.appointmentFilters.date)}" />
       <select id="adminAppointmentHospitalFilter">
         <option value="">All hospitals</option>
-        ${hospitals.map((item) => `<option value="${escapeHtml(item)}" ${state.admin.appointmentFilters.hospital === item ? "selected" : ""}>${escapeHtml(item)}</option>`).join("")}
+        ${hospitals.map((item) => `<option value="${item.id}" ${String(state.admin.appointmentFilters.hospital) === String(item.id) ? "selected" : ""}>${escapeHtml(item.name)}</option>`).join("")}
       </select>
       <select id="adminAppointmentDoctorFilter">
         <option value="">All doctors</option>
-        ${doctors.map((item) => `<option value="${escapeHtml(item)}" ${state.admin.appointmentFilters.doctor === item ? "selected" : ""}>${escapeHtml(item)}</option>`).join("")}
+        ${doctors.map((item) => `<option value="${item.id}" ${String(state.admin.appointmentFilters.doctor) === String(item.id) ? "selected" : ""}>${escapeHtml(item.name)}</option>`).join("")}
+      </select>
+      <select id="adminAppointmentPriorityFilter">
+        <option value="">All priorities</option>
+        ${["normal", "emergency"].map((item) => `<option value="${item}" ${state.admin.appointmentFilters.priority === item ? "selected" : ""}>${formatPriorityLabel(item)}</option>`).join("")}
       </select>
       <select id="adminAppointmentStatusFilter">
         <option value="">All statuses</option>
@@ -1030,19 +1648,26 @@ function appointmentsTable() {
       filteredAppointments.length
         ? `
           <table>
-            <thead><tr><th>Patient</th><th>Mobile</th><th>Hospital</th><th>Doctor</th><th>Date</th><th>Token</th><th>Status</th><th>Queue Control</th><th>Doctor View</th></tr></thead>
+            <thead><tr><th>Patient</th><th>Hospital</th><th>Doctor</th><th>Date</th><th>Queue</th><th>Status</th><th>Visit Notes</th><th>Queue Control</th><th>Doctor View</th></tr></thead>
             <tbody>
               ${filteredAppointments
                 .map(
                   (appointment) => `
                     <tr>
-                      <td>${escapeHtml(appointment.user_name)}</td>
-                      <td>${escapeHtml(appointment.mobile)}</td>
+                      <td>
+                        ${escapeHtml(appointment.user_name)}
+                        <br><span class="table-subtext">${escapeHtml(appointment.mobile)}</span>
+                        ${appointment.reason_for_visit ? `<br><span class="table-subtext">${escapeHtml(appointment.reason_for_visit)}</span>` : ""}
+                      </td>
                       <td>${escapeHtml(appointment.hospital_name)}<br><span class="table-subtext">${escapeHtml(appointment.city_name)}</span></td>
-                      <td>${escapeHtml(appointment.doctor_name)}<br><span class="table-subtext">${escapeHtml(appointment.specialization || "")}</span></td>
+                      <td>${escapeHtml(appointment.doctor_name)}<br><span class="table-subtext">${escapeHtml(appointment.department_name || appointment.specialization || "")}</span></td>
                       <td>${formatDate(appointment.appointment_date)}</td>
-                      <td>${appointment.token_number}</td>
+                      <td>
+                        <strong>Token ${appointment.token_number}</strong>
+                        <br>${priorityBadge(appointment.priority)}
+                      </td>
                       <td>${statusBadge(appointment.status)}</td>
+                      <td>${renderVisitNotesForm(appointment)}</td>
                       <td class="table-actions">
                         ${renderStatusActionButton(appointment, "serving", "Serving")}
                         ${renderStatusActionButton(appointment, "completed", "Complete")}
@@ -1071,18 +1696,25 @@ function doctorTodayTable() {
 
   return `
     <table>
-      <thead><tr><th>Token</th><th>Patient</th><th>Mobile</th><th>Status</th><th>Action</th></tr></thead>
+      <thead><tr><th>Token</th><th>Patient</th><th>Priority</th><th>Status</th><th>Visit Notes</th><th>Action</th></tr></thead>
       <tbody>
         ${state.doctorDaily.appointments.map((item) => `
           <tr>
             <td>${item.token_number}</td>
-            <td>${escapeHtml(item.user_name)}</td>
-            <td>${escapeHtml(item.mobile || "")}</td>
+            <td>${escapeHtml(item.user_name)}<br><span class="table-subtext">${escapeHtml(item.mobile || "")}</span>${item.reason_for_visit ? `<br><span class="table-subtext">${escapeHtml(item.reason_for_visit)}</span>` : ""}</td>
+            <td>${priorityBadge(item.priority)}</td>
             <td>${statusBadge(item.status)}</td>
+            <td>${renderVisitNotesForm(item)}</td>
             <td class="table-actions">
-              ${renderStatusActionButton(item, "serving", "Serving")}
-              ${renderStatusActionButton(item, "completed", "Complete")}
-              ${renderStatusActionButton(item, "skipped", "Skip")}
+              ${
+                isAdmin()
+                  ? `
+                    ${renderStatusActionButton(item, "serving", "Serving")}
+                    ${renderStatusActionButton(item, "completed", "Complete")}
+                    ${renderStatusActionButton(item, "skipped", "Skip")}
+                  `
+                  : '<span class="table-subtext">Admin queue controls only</span>'
+              }
             </td>
           </tr>
         `).join("")}
@@ -1115,24 +1747,52 @@ function renderStatusActionButton(appointment, status, label) {
   `;
 }
 
+function renderVisitNotesForm(appointment) {
+  const notes = escapeHtml(appointment.visit_notes || "");
+  if (!isStaff()) {
+    return notes || "<span class='table-subtext'>No notes</span>";
+  }
+
+  return `
+    <form class="compact-form" data-form="visit-notes-form">
+      <input type="hidden" name="appointment_id" value="${appointment.appointment_id || appointment.id}" />
+      <textarea name="visit_notes" rows="3" placeholder="Add visit notes">${notes}</textarea>
+      <div class="form-actions">
+        <button class="ghost-button" type="submit">Save Notes</button>
+      </div>
+      <p class="form-feedback" aria-live="polite"></p>
+    </form>
+  `;
+}
+
 async function handleClick(event) {
   const routeTarget = event.target.closest("[data-route]");
   const actionTarget = event.target.closest("[data-action]");
 
   if (routeTarget) {
+    closeMobileMenu();
     state.route = routeTarget.dataset.route;
     if (state.route === "admin") await loadAdminData();
     if (state.route === "admin-board") await Promise.all([loadAdminBoard(), loadAdminData()]);
     if (state.route === "appointments") await loadMyAppointments();
+    if (state.route === "profile") await Promise.all([loadProfile(), loadMyAppointments()]);
+    if (state.route === "notifications") await loadNotifications({ markRead: true });
     if (state.route === "confirmation" && state.latestAppointment?.id) {
       await loadAppointmentDetails(state.latestAppointment.id);
       history.replaceState({}, "", `/?appointment=${state.latestAppointment.id}`);
+    } else if (state.route === "profile") {
+      history.replaceState({}, "", "/profile");
+    } else if (state.route === "notifications") {
+      history.replaceState({}, "", "/notifications");
     } else if (state.route === "admin") {
       history.replaceState({}, "", "/admin");
     } else if (state.route === "admin-board") {
       history.replaceState({}, "", "/admin/board");
-    } else if (!["doctor-today"].includes(state.route)) {
+    } else if (!["doctor-today", "doctor-detail", "hospital-detail"].includes(state.route)) {
       history.replaceState({}, "", "/");
+    }
+    if (state.route === "hospitals" && state.selectedCity?.id && !state.hospitals.length) {
+      await loadHospitals(state.selectedCity.id);
     }
     if (state.route === "doctors") {
       if (state.selectedCity && !state.hospitals.length) {
@@ -1151,22 +1811,44 @@ async function handleClick(event) {
   if (!actionTarget) return;
   const action = actionTarget.dataset.action;
 
+  if (action === "open-profile") {
+    await openProfilePage();
+    return;
+  }
+
   if (action === "open-city") {
     state.selectedCity = { id: Number(actionTarget.dataset.cityId), name: actionTarget.dataset.cityName };
     state.filters.cityId = String(state.selectedCity.id);
     state.filters.hospitalId = "";
     await loadHospitals(state.selectedCity.id);
     state.route = "hospitals";
+    closeMobileMenu();
     render();
   }
 
   if (action === "open-hospital") {
-    state.selectedHospital = state.hospitals.find((item) => item.id === Number(actionTarget.dataset.id));
+    await openHospitalDetailPage(actionTarget.dataset.id);
+    return;
+  }
+
+  if (action === "open-hospital-detail") {
+    await openHospitalDetailPage(actionTarget.dataset.hospitalId);
+    return;
+  }
+
+  if (action === "open-hospital-directory") {
+    const hospitalId = Number(actionTarget.dataset.hospitalId);
+    state.selectedHospital =
+      state.hospitals.find((item) => item.id === hospitalId) ||
+      state.hospitalDetail ||
+      state.selectedHospital;
     state.filters.cityId = String(state.selectedHospital?.city_id || state.selectedCity?.id || "");
-    state.filters.hospitalId = String(state.selectedHospital?.id || "");
-    await loadDoctors(state.selectedHospital.id);
+    state.filters.hospitalId = String(hospitalId || "");
+    await loadDoctors(hospitalId);
     await loadDoctorDirectory();
     state.route = "doctors";
+    history.replaceState({}, "", "/");
+    closeMobileMenu();
     render();
   }
 
@@ -1187,6 +1869,7 @@ async function handleClick(event) {
   if (action === "cancel-appointment") {
     await apiFetch(`/appointment/${actionTarget.dataset.appointmentId}/cancel`, { method: "POST" });
     await loadMyAppointments();
+    await loadNotifications();
     if (state.latestAppointment?.id === Number(actionTarget.dataset.appointmentId)) {
       await loadAppointmentDetails(actionTarget.dataset.appointmentId);
     }
@@ -1196,6 +1879,9 @@ async function handleClick(event) {
 
   if (action === "delete-hospital") {
     await apiFetch(`/admin/delete-hospital/${actionTarget.dataset.id}`, { method: "POST" });
+    if (state.editingHospitalId === Number(actionTarget.dataset.id)) {
+      state.editingHospitalId = null;
+    }
     await loadAdminData();
     render();
     showToast("Hospital deleted");
@@ -1213,8 +1899,18 @@ async function handleClick(event) {
     render();
   }
 
+  if (action === "edit-hospital") {
+    state.editingHospitalId = Number(actionTarget.dataset.id);
+    render();
+  }
+
   if (action === "cancel-edit") {
     state.editingDoctorId = null;
+    render();
+  }
+
+  if (action === "cancel-hospital-edit") {
+    state.editingHospitalId = null;
     render();
   }
 
@@ -1244,28 +1940,16 @@ async function handleClick(event) {
     if (!hospital) return;
     state.selectedCity = { id: Number(hospital.city_id), name: hospital.city_name };
     state.filters.cityId = String(hospital.city_id);
-    state.filters.hospitalId = "";
     await loadHospitals(hospital.city_id);
-    state.route = "hospitals";
-    history.replaceState({}, "", "/");
-    render();
+    await openHospitalDetailPage(hospital.id);
+    return;
   }
 
   if (action === "open-favorite-doctor") {
     const doctor = state.favorites.doctors.find((item) => String(item.id) === String(actionTarget.dataset.doctorId));
     if (!doctor) return;
-    state.selectedCity = { id: Number(doctor.city_id), name: doctor.city_name };
-    state.filters.cityId = String(doctor.city_id);
-    await loadHospitals(doctor.city_id);
-    state.selectedHospital = state.hospitals.find((item) => String(item.id) === String(doctor.hospital_id)) || null;
-    state.filters.hospitalId = String(doctor.hospital_id);
-    if (state.selectedHospital) {
-      await loadDoctors(state.selectedHospital.id);
-    }
-    await loadDoctorDirectory();
-    state.route = "doctors";
-    history.replaceState({}, "", "/");
-    render();
+    await openDoctorDetailPage(doctor.id);
+    return;
   }
 
   if (action === "update-appointment-status") {
@@ -1294,12 +1978,31 @@ async function handleClick(event) {
     await loadDoctorToday(doctorId);
     state.route = "doctor-today";
     history.replaceState({}, "", `/doctor/${doctorId}/today`);
+    closeMobileMenu();
     render();
   }
 
+  if (action === "open-doctor-detail") {
+    await openDoctorDetailPage(actionTarget.dataset.doctorId);
+    return;
+  }
+
   if (action === "export-appointments") {
-    exportAppointmentsCsv(getFilteredAdminAppointments());
+    downloadAdminAppointmentsCsv();
     showToast("Appointment report downloaded.");
+  }
+
+  if (action === "refresh-notifications") {
+    await loadNotifications({ markRead: true });
+    render();
+    showToast("Notifications refreshed.");
+  }
+
+  if (action === "delete-doctor-leave") {
+    await apiFetch(`/admin/doctor-leaves/${actionTarget.dataset.id}/delete`, { method: "POST" });
+    await loadAdminData();
+    render();
+    showToast("Doctor leave deleted");
   }
 
   if (action === "check-in-appointment") {
@@ -1333,7 +2036,7 @@ async function handleSubmit(event) {
     }
 
     if (form.dataset.form === "book-appointment") {
-      const selectedDoctor = (state.doctorDirectory.length ? state.doctorDirectory : state.doctors).find(
+      const selectedDoctor = (shouldUseFilteredDoctorDirectory() ? state.doctorDirectory : state.doctors).find(
         (doctor) => String(doctor.id) === String(data.doctor_id)
       );
       const validationError = validateBookingData(data);
@@ -1354,10 +2057,18 @@ async function handleSubmit(event) {
       state.slotAvailability = {};
       await loadAppointmentDetails(booking.id);
       await loadMyAppointments();
+      await loadNotifications();
+      if (state.session?.user) {
+        state.session.user.phone = data.mobile;
+      }
       state.route = "confirmation";
       history.replaceState({}, "", `/?appointment=${booking.id}`);
       render();
-      showToast(`Appointment booked. Your token is ${booking.token_number}.`);
+      showToast(
+        data.priority === "emergency"
+          ? `Emergency appointment booked. Your token is ${booking.token_number}.`
+          : `Appointment booked. Your token is ${booking.token_number}.`
+      );
     }
 
     if (form.dataset.form === "reschedule-appointment") {
@@ -1367,6 +2078,7 @@ async function handleSubmit(event) {
       });
       state.slotAvailability = {};
       await loadMyAppointments();
+      await loadNotifications();
       if (state.latestAppointment?.id === Number(data.appointment_id)) {
         await loadAppointmentDetails(data.appointment_id);
       }
@@ -1382,12 +2094,16 @@ async function handleSubmit(event) {
       showToast("Family member added");
     }
 
-    if (form.dataset.form === "add-hospital") {
-      await apiFetch("/admin/add-hospital", { method: "POST", body: JSON.stringify(data) });
+    if (form.dataset.form === "hospital-form") {
+      const url = state.editingHospitalId
+        ? `/admin/update-hospital/${state.editingHospitalId}`
+        : "/admin/add-hospital";
+      await apiFetch(url, { method: "POST", body: JSON.stringify(data) });
       form.reset();
+      state.editingHospitalId = null;
       await loadAdminData();
       render();
-      showToast("Hospital added");
+      showToast("Hospital details saved");
     }
 
     if (form.dataset.form === "add-city") {
@@ -1408,6 +2124,47 @@ async function handleSubmit(event) {
       await loadAdminData();
       render();
       showToast("Doctor details saved");
+    }
+
+    if (form.dataset.form === "doctor-leave-form") {
+      await apiFetch("/admin/doctor-leaves", { method: "POST", body: JSON.stringify(data) });
+      form.reset();
+      await loadAdminData();
+      render();
+      showToast("Doctor leave saved");
+    }
+
+    if (form.dataset.form === "visit-notes-form") {
+      await apiFetch(`/admin/appointment/${data.appointment_id}/visit-notes`, {
+        method: "POST",
+        body: JSON.stringify({ visit_notes: data.visit_notes }),
+      });
+      if (isAdmin()) {
+        await loadAdminData();
+      }
+      if (state.route === "doctor-today" && state.doctorDaily?.doctor_id) {
+        await loadDoctorToday(state.doctorDaily.doctor_id);
+      }
+      if (state.latestAppointment?.id === Number(data.appointment_id)) {
+        await loadAppointmentDetails(data.appointment_id);
+      }
+      render();
+      showToast("Visit notes saved");
+    }
+
+    if (form.dataset.form === "profile-form") {
+      const result = await apiFetch("/profile", {
+        method: "POST",
+        body: JSON.stringify(data),
+      });
+      state.profile = state.profile
+        ? { ...state.profile, user: result.user }
+        : { user: result.user, stats: null };
+      if (state.session?.user) {
+        state.session.user = { ...state.session.user, ...result.user };
+      }
+      render();
+      showToast("Profile updated");
     }
   } catch (error) {
     setFormFeedback(form, error.message);
@@ -1447,6 +2204,11 @@ async function handleChange(event) {
     refreshDoctorDirectory();
   }
 
+  if (event.target.id === "doctorDepartmentFilter") {
+    state.filters.departmentId = event.target.value;
+    refreshDoctorDirectory();
+  }
+
   if (event.target.id === "doctorSpecializationFilter") {
     state.filters.specialization = event.target.value;
     refreshDoctorDirectory();
@@ -1479,21 +2241,31 @@ async function handleChange(event) {
 
   if (event.target.id === "adminAppointmentDateFilter") {
     state.admin.appointmentFilters.date = event.target.value;
+    await loadAdminAppointments();
     render();
   }
 
   if (event.target.id === "adminAppointmentHospitalFilter") {
     state.admin.appointmentFilters.hospital = event.target.value;
+    await loadAdminAppointments();
     render();
   }
 
   if (event.target.id === "adminAppointmentDoctorFilter") {
     state.admin.appointmentFilters.doctor = event.target.value;
+    await loadAdminAppointments();
+    render();
+  }
+
+  if (event.target.id === "adminAppointmentPriorityFilter") {
+    state.admin.appointmentFilters.priority = event.target.value;
+    await loadAdminAppointments();
     render();
   }
 
   if (event.target.id === "adminAppointmentStatusFilter") {
     state.admin.appointmentFilters.status = event.target.value;
+    await loadAdminAppointments();
     render();
   }
 }
@@ -1504,8 +2276,10 @@ function fillDoctorForm() {
   if (!doctor || !form) return;
   form.name.value = doctor.name;
   form.specialization.value = doctor.specialization;
+  form.department_id.value = doctor.department_id || "";
   form.hospital_id.value = doctor.hospital_id;
   form.image.value = doctor.image || "";
+  form.max_patients_per_day.value = doctor.max_patients_per_day || 24;
   form.available_from.value = doctor.available_from.slice(0, 5);
   form.available_to.value = doctor.available_to.slice(0, 5);
   form.availability_note.value = doctor.availability_note || "";
@@ -1515,6 +2289,18 @@ function fillDoctorForm() {
   Array.from(form.unavailable_days.options).forEach((option) => {
     option.selected = selectedDays.includes(option.value);
   });
+}
+
+function fillHospitalForm() {
+  const hospital = state.admin.hospitals.find((item) => item.id === state.editingHospitalId);
+  const form = document.querySelector('[data-form="hospital-form"]');
+  if (!hospital || !form) return;
+  form.name.value = hospital.name;
+  form.city_id.value = hospital.city_id;
+  form.location.value = hospital.location;
+  form.image.value = hospital.image || "";
+  form.contact_phone.value = hospital.contact_phone || "";
+  form.map_link.value = hospital.map_link || "";
 }
 
 function syncBookingNameWithFamily(form) {
@@ -1540,6 +2326,18 @@ function setLoading(isLoading) {
   loadingOverlay.classList.toggle("hidden", !isLoading);
 }
 
+function syncMobileMenu() {
+  document.body.dataset.navOpen = state.mobileMenuOpen ? "true" : "false";
+  navScrim.classList.toggle("hidden", !state.mobileMenuOpen);
+  menuToggle.setAttribute("aria-expanded", state.mobileMenuOpen ? "true" : "false");
+}
+
+function closeMobileMenu() {
+  if (!state.mobileMenuOpen) return;
+  state.mobileMenuOpen = false;
+  syncMobileMenu();
+}
+
 function updateThemeLabel() {
   themeToggle.innerHTML =
     state.theme === "dark"
@@ -1547,9 +2345,18 @@ function updateThemeLabel() {
       : '<i class="fa-solid fa-moon"></i><span>Dark mode</span>';
 }
 
+function updateInstallButtonVisibility() {
+  installButton.classList.toggle("hidden", !deferredInstallPrompt);
+}
+
 function isAdmin() {
   const user = state.session?.user;
   return Boolean(user && (user.role === "admin" || user.email === ADMIN_EMAIL));
+}
+
+function isStaff() {
+  const role = String(state.session?.user?.role || "").toLowerCase();
+  return isAdmin() || role === "doctor";
 }
 
 function showToast(message, type = "success") {
@@ -1574,6 +2381,7 @@ function validateBookingData(data) {
   if (!data.family_member_id && !data.name?.trim()) return "Patient name is required.";
   if (!/^[0-9]{10}$/.test((data.mobile || "").replace(/\D/g, ""))) return "Enter a valid 10-digit mobile number.";
   if (!data.date) return "Please select an appointment date.";
+  if (!data.reason_for_visit?.trim()) return "Please enter the reason for visit.";
   return "";
 }
 
@@ -1593,6 +2401,16 @@ function formatDate(value) {
     year: "numeric",
     month: "short",
     day: "numeric",
+  });
+}
+
+function formatDateTime(value) {
+  return new Date(value).toLocaleString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
   });
 }
 
@@ -1637,7 +2455,9 @@ function formatAvailabilitySummary(doctor) {
   const days = doctor.unavailable_days
     ? `Off: ${formatUnavailableDays(doctor.unavailable_days)}`
     : "Available all week";
-  return doctor.availability_note ? `${days} - ${doctor.availability_note}` : days;
+  const capacity = doctor.max_patients_per_day ? `Capacity: ${doctor.max_patients_per_day}/day` : "";
+  const summary = [days, capacity, doctor.availability_note].filter(Boolean).join(" - ");
+  return summary || "Available all week";
 }
 
 function estimateWait(remainingPatients) {
@@ -1709,13 +2529,19 @@ async function updateAutoSlotPreview(form, { doctorId, date, excludeAppointmentI
     return;
   }
 
+  if (slotResponse.limitReached) {
+    previewNode.textContent = "Doctor limit reached for this day.";
+    if (feedback) feedback.textContent = slotResponse.note || "Daily booking limit reached.";
+    return;
+  }
+
   if (feedback) {
     feedback.textContent = slotResponse.nextSlot
       ? ""
       : "All fixed slots are already booked for this date. Please choose another day.";
   }
   previewNode.textContent = slotResponse.nextSlot
-    ? `Next automatic slot: Token ${slotResponse.nextSlot.slotNumber} • ${slotResponse.nextSlot.label}`
+    ? `Next automatic slot: Token ${slotResponse.nextSlot.slotNumber} • ${slotResponse.nextSlot.label}${slotResponse.maxPatientsPerDay ? ` • ${slotResponse.bookedPatients}/${slotResponse.maxPatientsPerDay} booked` : ""}`
     : "All automatic slots are full for this date.";
 }
 
@@ -1729,15 +2555,20 @@ function getCurrentHospitalOptions() {
   return baseHospitals.filter((hospital) => String(hospital.city_id) === String(state.filters.cityId));
 }
 
+function shouldUseFilteredDoctorDirectory() {
+  return Boolean(
+    state.doctorDirectory.length ||
+      state.filters.cityId ||
+      state.filters.hospitalId ||
+      state.filters.departmentId ||
+      state.filters.specialization ||
+      state.filters.day ||
+      state.filters.search
+  );
+}
+
 function getFilteredAdminAppointments() {
-  return state.admin.appointments.filter((appointment) => {
-    const filters = state.admin.appointmentFilters;
-    if (filters.date && appointment.appointment_date !== filters.date) return false;
-    if (filters.hospital && appointment.hospital_name !== filters.hospital) return false;
-    if (filters.doctor && appointment.doctor_name !== filters.doctor) return false;
-    if (filters.status && (appointment.status || "").toLowerCase() !== filters.status) return false;
-    return true;
-  });
+  return state.admin.appointments;
 }
 
 function getAppointmentById(appointmentId) {
@@ -1762,8 +2593,24 @@ function statusBadge(status) {
   return `<span class="chip status-badge status-badge--${normalized}">${escapeHtml(formatStatusLabel(normalized))}</span>`;
 }
 
+function formatPriorityLabel(priority) {
+  return normalizePriority(priority) === "emergency" ? "Emergency" : "Normal";
+}
+
+function priorityBadge(priority) {
+  const normalized = normalizePriority(priority);
+  const icon = normalized === "emergency" ? "fa-truck-medical" : "fa-user-clock";
+  return `<span class="chip"><i class="fa-solid ${icon}"></i>${escapeHtml(formatPriorityLabel(normalized))}</span>`;
+}
+
 function capitalize(value) {
   return String(value || "").charAt(0).toUpperCase() + String(value || "").slice(1);
+}
+
+function normalizePriority(priority) {
+  return String(priority || "normal").toLowerCase() === "emergency"
+    ? "emergency"
+    : "normal";
 }
 
 function formatStatusLabel(value) {
@@ -1772,6 +2619,16 @@ function formatStatusLabel(value) {
     .filter(Boolean)
     .map((part) => capitalize(part))
     .join(" ");
+}
+
+function formatNotificationType(type) {
+  const labels = {
+    booking_created: "Booking created",
+    booking_cancelled: "Booking cancelled",
+    booking_rescheduled: "Booking rescheduled",
+  };
+
+  return labels[type] || "Update";
 }
 
 function printAppointmentSlip(appointment) {
@@ -1795,14 +2652,17 @@ function printAppointmentSlip(appointment) {
           <h1>PulseCare HMS Appointment Slip</h1>
           <div class="row"><strong>Hospital:</strong> ${escapeHtml(appointment.hospital_name)}</div>
           <div class="row"><strong>Doctor:</strong> ${escapeHtml(appointment.doctor_name)}</div>
+          ${appointment.department_name ? `<div class="row"><strong>Department:</strong> ${escapeHtml(appointment.department_name)}</div>` : ""}
           <div class="row"><strong>Date:</strong> ${escapeHtml(formatDate(appointment.appointment_date))}</div>
           <div class="row"><strong>Time Slot:</strong> ${escapeHtml(formatAppointmentSlot(appointment))}</div>
+          <div class="row"><strong>Priority:</strong> ${escapeHtml(formatPriorityLabel(appointment.priority))}</div>
           <div class="row"><strong>Patient:</strong> ${escapeHtml(appointment.user_name)}</div>
           ${
             appointment.family_member_name
               ? `<div class="row"><strong>Booked For:</strong> ${escapeHtml(appointment.family_member_name)}${appointment.family_relation ? ` • ${escapeHtml(appointment.family_relation)}` : ""}</div>`
               : ""
           }
+          ${appointment.reason_for_visit ? `<div class="row"><strong>Reason:</strong> ${escapeHtml(appointment.reason_for_visit)}</div>` : ""}
           <div class="row"><strong>Mobile:</strong> ${escapeHtml(appointment.mobile || "")}</div>
           <div class="row"><strong>Location:</strong> ${escapeHtml(appointment.hospital_location || "")}</div>
           <div class="token">Token: ${escapeHtml(String(appointment.token_number))}</div>
@@ -1814,35 +2674,14 @@ function printAppointmentSlip(appointment) {
   win.document.close();
 }
 
-function exportAppointmentsCsv(appointments) {
-  const rows = [
-    ["Patient", "Mobile", "Hospital", "Doctor", "Date", "Token", "Status"],
-    ...appointments.map((appointment) => [
-      appointment.user_name,
-      appointment.mobile,
-      appointment.hospital_name,
-      appointment.doctor_name,
-      appointment.appointment_date,
-      appointment.token_number,
-      appointment.status,
-    ]),
-  ];
-  const csv = rows
-    .map((row) =>
-      row
-        .map((value) => `"${String(value ?? "").replace(/"/g, '""')}"`)
-        .join(",")
-    )
-    .join("\n");
-  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
-  const url = URL.createObjectURL(blob);
+function downloadAdminAppointmentsCsv() {
+  const params = getAdminAppointmentQueryParams();
+  const url = `/admin/appointments/export${params.toString() ? `?${params.toString()}` : ""}`;
   const link = document.createElement("a");
   link.href = url;
-  link.download = `appointments-${todayDate()}.csv`;
   document.body.appendChild(link);
   link.click();
   link.remove();
-  URL.revokeObjectURL(url);
 }
 
 function placeholderImage(type) {

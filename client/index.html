@@ -3,7 +3,13 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#db8636" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
     <title>PulseCare HMS</title>
+    <link rel="manifest" href="/manifest.json" />
+    <link rel="icon" href="/icons/icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/icons/icon-192.png" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -24,6 +30,9 @@
       <div class="main-panel">
         <header class="topbar">
           <div class="topbar__intro">
+            <button class="menu-toggle" id="menuToggle" type="button" aria-label="Open navigation menu">
+              <i class="fa-solid fa-bars"></i>
+            </button>
             <div class="topbar__brand">
               <div class="brand-badge"><i class="fa-solid fa-heart-pulse"></i></div>
               <div>
@@ -38,8 +47,12 @@
           </div>
           <div class="topbar__meta">
             <nav class="topbar__nav" id="sidebarNav"></nav>
+            <button class="secondary-button hidden" id="installButton" type="button">
+              <i class="fa-solid fa-download"></i>
+              <span>Install App</span>
+            </button>
             <button class="theme-toggle" id="themeToggle" type="button"></button>
-            <div class="user-chip" id="userChip"></div>
+            <button class="user-chip" id="userChip" type="button"></button>
             <button class="secondary-button hidden" id="logoutButton" type="button">
               <i class="fa-solid fa-arrow-right-from-bracket"></i>
               <span>Logout</span>
@@ -50,6 +63,7 @@
         <main class="content" id="app"></main>
       </div>
     </div>
+    <div class="nav-scrim hidden" id="navScrim"></div>
 
     <template id="loginTemplate">
       <section class="hero">
@@ -99,6 +113,7 @@
       </div>
     </div>
 
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
     <script src="/script.js"></script>
   </body>
 </html>

@@ -28,7 +28,7 @@ async function syncUser(profile) {
       `UPDATE users
        SET name = $1, photo = $2, role = $3
        WHERE id = $4
-       RETURNING id, name, email, photo, role`,
+       RETURNING id, name, email, photo, role, phone`,
       [name, photo, role, existingUser.id]
     );
     return updatedUserResult.rows[0];
@@ -37,7 +37,7 @@ async function syncUser(profile) {
   const insertUserResult = await pool.query(
     `INSERT INTO users (name, email, photo, role)
      VALUES ($1, $2, $3, $4)
-     RETURNING id, name, email, photo, role`,
+     RETURNING id, name, email, photo, role, phone`,
     [name, email, photo, forcedRole || "patient"]
   );
 
@@ -67,7 +67,7 @@ passport.serializeUser((user, done) => done(null, user.id));
 passport.deserializeUser(async (id, done) => {
   try {
     const result = await pool.query(
-      "SELECT id, name, email, photo, role FROM users WHERE id = $1",
+      "SELECT id, name, email, photo, role, phone FROM users WHERE id = $1",
       [id]
     );
     done(null, result.rows[0] || null);

@@ -25,7 +25,7 @@ async function getDoctorSlots(req, res, next) {
 
     const doctorResult = await pool.query(
       `SELECT id, name, available_from, available_to, slot_step_minutes, slot_duration_minutes,
-              unavailable_days, availability_note
+              unavailable_days, availability_note, max_patients_per_day
        FROM doctors
        WHERE id = $1
        LIMIT 1`,
@@ -42,7 +42,18 @@ async function getDoctorSlots(req, res, next) {
       .split(",")
       .map((value) => value.trim().toLowerCase())
       .filter(Boolean);
-    const unavailable = blockedDays.includes(requestedDay);
+    const weeklyUnavailable = blockedDays.includes(requestedDay);
+
+    const leaveResult = await pool.query(
+      `SELECT reason
+       FROM doctor_leaves
+       WHERE doctor_id = $1
+         AND leave_date = $2
+       LIMIT 1`,
+      [doctorId, date]
+    );
+    const leave = leaveResult.rows[0] || null;
+    const unavailable = weeklyUnavailable || Boolean(leave);
 
     const values = [doctorId, date];
     let excludeClause = "";
@@ -53,7 +64,8 @@ async function getDoctorSlots(req, res, next) {
 
     const bookedSlotsResult = await pool.query(
       `SELECT COALESCE(slot_number, token_number)::int AS slot_number,
-              COALESCE(token_number, 0)::int AS token_number
+              COALESCE(token_number, 0)::int AS token_number,
+              COALESCE(status, 'booked') AS status
        FROM appointments
        WHERE doctor_id = $1
          AND appointment_date = $2
@@ -61,12 +73,18 @@ async function getDoctorSlots(req, res, next) {
       values
     );
 
-    const bookedSlots = new Set(bookedSlotsResult.rows.map((row) => Number(row.slot_number)));
+    const activeRows = bookedSlotsResult.rows.filter(
+      (row) => String(row.status || "").toLowerCase() !== "cancelled"
+    );
+    const bookedSlots = new Set(activeRows.map((row) => Number(row.slot_number)));
     const nextTokenNumber =
       bookedSlotsResult.rows.reduce(
         (maxToken, row) => Math.max(maxToken, Number(row.token_number) || 0),
         0
       ) + 1;
+    const limitReached =
+      Number(doctor.max_patients_per_day || 0) > 0 &&
+      activeRows.length >= Number(doctor.max_patients_per_day);
     const slots = buildDoctorSlots({
       availableFrom: doctor.available_from,
       availableTo: doctor.available_to,
@@ -79,15 +97,26 @@ async function getDoctorSlots(req, res, next) {
       label: `${normalizeTime(slot.startTime)} to ${normalizeTime(slot.endTime)}`,
       isBooked: bookedSlots.has(slot.slotNumber),
     }));
-    const nextSlot = slots.find((slot) => slot.slotNumber === nextTokenNumber) || null;
+    const nextSlot = unavailable
+      ? null
+      : limitReached
+        ? null
+        : slots.find((slot) => slot.slotNumber === nextTokenNumber) || null;
 
     return res.json({
       doctorId: Number(doctorId),
       date,
       unavailable,
+      limitReached,
+      bookedPatients: activeRows.length,
+      maxPatientsPerDay: Number(doctor.max_patients_per_day || 0),
       nextSlot,
       note: unavailable
-        ? doctor.availability_note || `${doctor.name} is unavailable on ${requestedDay}.`
+        ? leave?.reason ||
+          doctor.availability_note ||
+          `${doctor.name} is unavailable on ${requestedDay}.`
+        : limitReached
+          ? `Daily booking limit of ${doctor.max_patients_per_day} patients has been reached.`
         : "",
       slots,
     });
@@ -101,6 +130,7 @@ async function getFavorites(req, res, next) {
     const [doctorFavorites, hospitalFavorites] = await Promise.all([
       pool.query(
         `SELECT d.id, d.name, d.specialization, d.image, d.hospital_id,
+                d.department_id, dep.name AS department_name,
                 h.city_id,
                 h.name AS hospital_name, h.location AS hospital_location,
                 c.name AS city_name
@@ -108,6 +138,7 @@ async function getFavorites(req, res, next) {
          JOIN doctors d ON d.id = fd.doctor_id
          JOIN hospitals h ON h.id = d.hospital_id
          JOIN cities c ON c.id = h.city_id
+         LEFT JOIN departments dep ON dep.id = d.department_id
          WHERE fd.user_id = $1
          ORDER BY d.name`,
         [req.user.id]
