@@ -445,6 +445,8 @@ function configureAutoRefresh() {
 }
 
 function render() {
+  document.body.classList.toggle("is-login", !state.session?.authenticated);
+
   if (state.route !== "admin") {
     destroyAdminCharts();
   }

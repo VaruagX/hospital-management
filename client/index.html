@@ -66,41 +66,44 @@
     <div class="nav-scrim hidden" id="navScrim"></div>
 
     <template id="loginTemplate">
-      <section class="hero">
-        <div class="hero__copy">
-          <p class="eyebrow">Digital Care Journey</p>
-          <h2>Book faster, manage smarter, and track live queues in one place.</h2>
+      <section class="login-stage" aria-label="PulseCare sign in">
+        <div class="login-panel">
+          <div class="login-panel__brand">
+            <div class="login-logo">PC</div>
+            <strong>PulseCare HMS</strong>
+          </div>
+          <h2>PulseCare<br />HMS</h2>
           <p>
-            Patients can browse hospitals, pick doctors, reserve tokens, and monitor
-            queue progress. Admins get a responsive operations panel with live counts
-            and management tools.
+            Fast hospital booking, live queue visibility, and protected
+            operations for patients, doctors, and administrators.
           </p>
-          <button class="primary-button hero__button" id="loginButton" type="button">
+          <div class="login-feature-grid" aria-label="Core features">
+            <div>
+              <strong>Book</strong>
+              <span>Doctor visits</span>
+            </div>
+            <div>
+              <strong>Queue</strong>
+              <span>Live tokens</span>
+            </div>
+            <div>
+              <strong>Care</strong>
+              <span>Admin tools</span>
+            </div>
+          </div>
+        </div>
+        <div class="login-card">
+          <p class="eyebrow">Secure Workspace</p>
+          <h2>Sign in to<br />manage care.</h2>
+          <p>
+            Google authentication is connected. Your hospital dashboard,
+            appointments, patient queues, and admin records stay protected
+            behind your account.
+          </p>
+          <button class="login-google-button" id="loginButton" type="button">
             <i class="fa-brands fa-google"></i>
             <span>Continue with Google</span>
           </button>
-        </div>
-        <div class="hero__visual">
-          <div class="hero-card glass">
-            <div class="hero-card__row">
-              <span>Live token tracking</span>
-              <strong>Queue first design</strong>
-            </div>
-            <div class="hero-metrics">
-              <div>
-                <small>Hospitals</small>
-                <strong>Connected by city</strong>
-              </div>
-              <div>
-                <small>Appointments</small>
-                <strong>Smart token generation</strong>
-              </div>
-              <div>
-                <small>Admin tools</small>
-                <strong>Role protected access</strong>
-              </div>
-            </div>
-          </div>
         </div>
       </section>
     </template>
