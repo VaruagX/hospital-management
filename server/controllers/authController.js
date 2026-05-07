@@ -10,17 +10,25 @@ async function getSession(req, res) {
 }
 
 function logout(req, res, next) {
+  const isProduction = process.env.NODE_ENV === "production";
+
   req.logout((error) => {
     if (error) {
+      console.error("Logout failed", error);
       return next(error);
     }
 
     req.session.destroy((sessionError) => {
       if (sessionError) {
+        console.error("Session destroy failed during logout", sessionError);
         return next(sessionError);
       }
 
-      res.clearCookie("connect.sid");
+      res.clearCookie("connect.sid", {
+        httpOnly: true,
+        sameSite: "lax",
+        secure: isProduction,
+      });
       return res.json({ success: true });
     });
   });

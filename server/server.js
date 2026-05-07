@@ -12,8 +12,18 @@ const { ensureSchema } = require("./config/schema");
 const { startReminderScheduler } = require("./services/reminderService");
 
 const app = express();
-const PORT = Number(process.env.PORT) || 8000;
-const baseUrl = process.env.BASE_URL || `http://localhost:${PORT}`;
+const PORT = process.env.PORT ? Number(process.env.PORT) : 8000;
+const isProduction = process.env.NODE_ENV === "production";
+const configuredBaseUrl = process.env.BASE_URL || process.env.RENDER_EXTERNAL_URL;
+const isLocalBaseUrl = /localhost|127\.0\.0\.1/.test(configuredBaseUrl || "");
+const baseUrl = isProduction
+  ? !isLocalBaseUrl && configuredBaseUrl
+    ? configuredBaseUrl
+    : "https://hospital-management-ocvn.onrender.com"
+  : process.env.BASE_URL || `http://localhost:${PORT}`;
+const sessionSecret = process.env.SESSION_SECRET || "fallback_secret";
+
+app.set("trust proxy", 1);
 
 app.use(
   cors({
@@ -25,13 +35,13 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(
   session({
-    secret: process.env.SESSION_SECRET || "fallback_secret",
+    secret: sessionSecret,
     resave: false,
     saveUninitialized: false,
     cookie: {
+      secure: isProduction,
       httpOnly: true,
       sameSite: "lax",
-      secure: false,
       maxAge: 1000 * 60 * 60 * 24 * 7,
     },
   })
