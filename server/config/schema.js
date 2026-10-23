@@ -126,8 +126,10 @@ async function ensureSchema() {
     `);
     await client.query(`
       UPDATE doctors
-      SET slot_step_minutes = 15,
-          slot_duration_minutes = 15
+      SET slot_step_minutes = COALESCE(slot_step_minutes, 15),
+          slot_duration_minutes = COALESCE(slot_duration_minutes, 15)
+      WHERE slot_step_minutes IS NULL
+         OR slot_duration_minutes IS NULL
     `);
     await client.query(`
       ALTER TABLE doctors

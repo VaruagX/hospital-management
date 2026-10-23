@@ -9,7 +9,21 @@ function normalizeTime(value) {
 
 function timeToMinutes(value) {
   const [hours, minutes] = normalizeTime(value).split(":");
-  return Number(hours) * 60 + Number(minutes);
+  const parsedHours = Number(hours);
+  const parsedMinutes = Number(minutes);
+
+  if (
+    !Number.isInteger(parsedHours) ||
+    !Number.isInteger(parsedMinutes) ||
+    parsedHours < 0 ||
+    parsedHours > 23 ||
+    parsedMinutes < 0 ||
+    parsedMinutes > 59
+  ) {
+    return NaN;
+  }
+
+  return parsedHours * 60 + parsedMinutes;
 }
 
 function minutesToTime(totalMinutes) {
@@ -20,14 +34,31 @@ function minutesToTime(totalMinutes) {
 }
 
 function buildDoctorSlots({
+  availableFrom,
   availableTo,
+  slotStepMinutes,
+  slotDurationMinutes,
 }) {
-  const fromMinutes = timeToMinutes(GLOBAL_SLOT_START_TIME);
-  const toMinutes = availableTo
-    ? Math.max(timeToMinutes(availableTo), fromMinutes + DEFAULT_SLOT_DURATION_MINUTES)
-    : fromMinutes + DEFAULT_SLOT_STEP_MINUTES * 24;
-  const stepMinutes = DEFAULT_SLOT_STEP_MINUTES;
-  const durationMinutes = DEFAULT_SLOT_DURATION_MINUTES;
+  const configuredFrom = timeToMinutes(availableFrom || GLOBAL_SLOT_START_TIME);
+  const configuredTo = timeToMinutes(availableTo);
+  const fromMinutes = Number.isFinite(configuredFrom)
+    ? configuredFrom
+    : timeToMinutes(GLOBAL_SLOT_START_TIME);
+  const fallbackTo = fromMinutes + DEFAULT_SLOT_STEP_MINUTES * 24;
+  const toMinutes = Number.isFinite(configuredTo) && configuredTo > fromMinutes
+    ? configuredTo
+    : fallbackTo;
+  const stepMinutes = Number(slotStepMinutes) > 0
+    ? Number(slotStepMinutes)
+    : DEFAULT_SLOT_STEP_MINUTES;
+  const durationMinutes = Number(slotDurationMinutes) > 0
+    ? Number(slotDurationMinutes)
+    : DEFAULT_SLOT_DURATION_MINUTES;
+
+  if (durationMinutes > toMinutes - fromMinutes) {
+    return [];
+  }
+
   const slots = [];
   let cursor = fromMinutes;
   let slotNumber = 1;

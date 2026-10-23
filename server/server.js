@@ -9,25 +9,25 @@ const apiRoutes = require("./routes/apiRoutes");
 const authRoutes = require("./routes/authRoutes");
 const adminRoutes = require("./routes/adminRoutes");
 const { ensureSchema } = require("./config/schema");
+const {
+  BASE_URL,
+  DEFAULT_SESSION_SECRET,
+  PORT,
+  SESSION_SECRET,
+  isProduction,
+  validateProductionConfig,
+} = require("./config/runtime");
 const { startReminderScheduler } = require("./services/reminderService");
 
 const app = express();
-const PORT = process.env.PORT ? Number(process.env.PORT) : 8000;
-const isProduction = process.env.NODE_ENV === "production";
-const configuredBaseUrl = process.env.BASE_URL || process.env.RENDER_EXTERNAL_URL;
-const isLocalBaseUrl = /localhost|127\.0\.0\.1/.test(configuredBaseUrl || "");
-const baseUrl = isProduction
-  ? !isLocalBaseUrl && configuredBaseUrl
-    ? configuredBaseUrl
-    : "https://hospital-management-ocvn.onrender.com"
-  : process.env.BASE_URL || `http://localhost:${PORT}`;
-const sessionSecret = process.env.SESSION_SECRET || "fallback_secret";
+
+validateProductionConfig();
 
 app.set("trust proxy", 1);
 
 app.use(
   cors({
-    origin: baseUrl,
+    origin: BASE_URL,
     credentials: true,
   })
 );
@@ -35,7 +35,7 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(
   session({
-    secret: sessionSecret,
+    secret: SESSION_SECRET,
     resave: false,
     saveUninitialized: false,
     cookie: {
@@ -48,6 +48,14 @@ app.use(
 );
 app.use(passport.initialize());
 app.use(passport.session());
+
+app.get("/health", (req, res) => {
+  res.json({ status: "ok" });
+});
+
+if (isProduction && SESSION_SECRET === DEFAULT_SESSION_SECRET) {
+  console.warn("SESSION_SECRET is not set. Using the fallback secret is unsafe in production.");
+}
 
 app.use(express.static(path.join(__dirname, "../client")));
 
@@ -66,7 +74,7 @@ app.use((req, res) => {
 app.use((error, req, res, next) => {
   console.error(error);
   res.status(error.statusCode || 500).json({
-    error: error.message || "Something went wrong",
+    error: isProduction ? "Something went wrong" : error.message || "Something went wrong",
   });
 });
 
@@ -74,7 +82,7 @@ async function startServer() {
   await ensureSchema();
 
   app.listen(PORT, () => {
-    console.log(`Server running on ${baseUrl}`);
+    console.log(`Server running on ${BASE_URL}`);
   });
 
   startReminderScheduler();

@@ -57,6 +57,7 @@ const state = {
   editingDoctorId: null,
   editingHospitalId: null,
   mobileMenuOpen: false,
+  bookingWizard: createDefaultBookingDraft(),
 };
 
 const app = document.getElementById("app");
@@ -74,6 +75,16 @@ const ADMIN_EMAIL = "gauravkale216@gmail.com";
 const APPOINTMENT_SLOT_START_TIME = "10:00";
 const APPOINTMENT_SLOT_STEP_MINUTES = 15;
 const APPOINTMENT_SLOT_DURATION_MINUTES = 15;
+const BOOKING_DRAFT_STORAGE_KEY = "pulsecare-booking-draft";
+const BOOKING_WIZARD_STEPS = [
+  { id: 1, label: "City", icon: "fa-location-dot" },
+  { id: 2, label: "Hospital", icon: "fa-hospital" },
+  { id: 3, label: "Department", icon: "fa-stethoscope" },
+  { id: 4, label: "Doctor", icon: "fa-user-doctor" },
+  { id: 5, label: "Date & Time", icon: "fa-calendar-days" },
+  { id: 6, label: "Patient", icon: "fa-id-card" },
+  { id: 7, label: "Review", icon: "fa-clipboard-check" },
+];
 let autoRefreshTimer = null;
 let adminCharts = [];
 let deferredInstallPrompt = null;
@@ -81,6 +92,7 @@ let deferredInstallPrompt = null;
 document.body.dataset.theme = state.theme;
 updateThemeLabel();
 syncMobileMenu();
+hydrateBookingDraft();
 
 themeToggle.addEventListener("click", () => {
   state.theme = state.theme === "dark" ? "light" : "dark";
@@ -98,7 +110,7 @@ navScrim.addEventListener("click", () => {
   closeMobileMenu();
 });
 
-logoutButton.addEventListener("click", async () => {
+logoutButton.addEventListener("click", withSafeHandler(async () => {
   await apiFetch("/api/logout", { method: "POST" }, { skipAuthRedirect: true });
   state.session = null;
   state.route = "home";
@@ -112,11 +124,13 @@ logoutButton.addEventListener("click", async () => {
   state.favorites = { doctors: [], hospitals: [] };
   state.familyMembers = [];
   state.slotAvailability = {};
+  state.bookingWizard = createDefaultBookingDraft();
+  persistBookingDraft();
   history.replaceState({}, "", "/");
   render();
-});
+}));
 
-installButton.addEventListener("click", async () => {
+installButton.addEventListener("click", withSafeHandler(async () => {
   if (!deferredInstallPrompt) return;
   deferredInstallPrompt.prompt();
   const choice = await deferredInstallPrompt.userChoice.catch(() => null);
@@ -130,12 +144,12 @@ installButton.addEventListener("click", async () => {
   }
   deferredInstallPrompt = null;
   updateInstallButtonVisibility();
-});
+}));
 
-document.addEventListener("click", handleClick);
-document.addEventListener("submit", handleSubmit);
-document.addEventListener("input", handleInput);
-document.addEventListener("change", handleChange);
+document.addEventListener("click", withSafeHandler(handleClick));
+document.addEventListener("submit", withSafeHandler(handleSubmit));
+document.addEventListener("input", withSafeHandler(handleInput));
+document.addEventListener("change", withSafeHandler(handleChange));
 
 window.addEventListener("beforeinstallprompt", (event) => {
   event.preventDefault();
@@ -149,6 +163,15 @@ window.addEventListener("appinstalled", () => {
   showToast("PulseCare installed on this device.");
 });
 
+window.addEventListener("unhandledrejection", (event) => {
+  event.preventDefault();
+  handleClientError(event.reason);
+});
+
+window.addEventListener("error", (event) => {
+  handleClientError(event.error || event.message);
+});
+
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", () => {
     navigator.serviceWorker.register("/sw.js").catch(() => {});
@@ -156,6 +179,61 @@ if ("serviceWorker" in navigator) {
 }
 
 init();
+
+function createDefaultBookingDraft() {
+  return {
+    step: 1,
+    cityId: "",
+    hospitalId: "",
+    departmentId: "",
+    doctorId: "",
+    date: "",
+    selectedSlotNumber: "",
+    expectedSlot: null,
+    hospitalSearch: "",
+    departmentSearch: "",
+    doctorSearch: "",
+    patientType: "existing",
+    bookingFor: "self",
+    familyMemberId: "",
+    patientName: "",
+    mobile: "",
+    emergencyContact: "",
+    reasonForVisit: "",
+    notes: "",
+    priority: "normal",
+    availabilityMessage: "",
+    availabilityStatus: "idle",
+  };
+}
+
+function hydrateBookingDraft() {
+  try {
+    const saved = sessionStorage.getItem(BOOKING_DRAFT_STORAGE_KEY);
+    if (!saved) return;
+    state.bookingWizard = {
+      ...createDefaultBookingDraft(),
+      ...JSON.parse(saved),
+    };
+  } catch (error) {
+    state.bookingWizard = createDefaultBookingDraft();
+  }
+}
+
+function persistBookingDraft() {
+  sessionStorage.setItem(
+    BOOKING_DRAFT_STORAGE_KEY,
+    JSON.stringify(state.bookingWizard)
+  );
+}
+
+function updateBookingDraft(patch) {
+  state.bookingWizard = {
+    ...state.bookingWizard,
+    ...patch,
+  };
+  persistBookingDraft();
+}
 
 async function init() {
   try {
@@ -167,6 +245,8 @@ async function init() {
       if (appointmentId) {
         await loadAppointmentDetails(appointmentId);
         state.route = "confirmation";
+      } else if (window.location.pathname === "/dashboard") {
+        state.route = "booking";
       } else if (window.location.pathname === "/profile") {
         state.route = "profile";
         await Promise.all([loadProfile(), loadMyAppointments()]);
@@ -189,7 +269,11 @@ async function init() {
         state.route = "admin";
         await loadAdminData();
       } else {
-        state.route = "cities";
+        state.route = "booking";
+      }
+
+      if (state.route === "booking") {
+        await loadBookingWizardData();
       }
     }
   } catch (error) {
@@ -223,6 +307,23 @@ async function apiFetch(url, options = {}, config = {}) {
   } finally {
     if (!config.silent) setLoading(false);
   }
+}
+
+function withSafeHandler(handler) {
+  return async function guardedHandler(event) {
+    try {
+      await handler(event);
+    } catch (error) {
+      handleClientError(error);
+    }
+  };
+}
+
+function handleClientError(error) {
+  const message = error?.message || String(error || "Something went wrong. Please try again.");
+  console.error(error);
+  setLoading(false);
+  showToast(message, "error");
 }
 
 async function loadCities() {
@@ -462,6 +563,7 @@ function render() {
     return;
   }
 
+  if (state.route === "booking") return renderBookingWizard();
   if (state.route === "cities") return renderCities();
   if (state.route === "hospitals") return renderHospitals();
   if (state.route === "hospital-detail") return renderHospitalDetail();
@@ -487,6 +589,7 @@ function updateHeader() {
 
   const titles = {
     home: ["Welcome", "Hospital Management System"],
+    booking: ["Patient booking", "Book a hospital appointment"],
     cities: ["Choose your city", "Find hospitals near you"],
     hospitals: ["Hospital directory", state.selectedCity?.name || "Hospitals"],
     "hospital-detail": ["Hospital details", state.hospitalDetail?.name || "Hospital overview"],
@@ -508,6 +611,7 @@ function updateHeader() {
 function renderNav() {
   const items = state.session?.authenticated
     ? [
+        { id: "booking", label: "Book Appointment", icon: "fa-calendar-check", activeRoutes: ["booking"] },
         { id: "cities", label: "Cities", icon: "fa-city", activeRoutes: ["cities"] },
         { id: "hospitals", label: "Hospitals", icon: "fa-hospital", hidden: !state.selectedCity && !state.hospitalDetail, activeRoutes: ["hospitals", "hospital-detail"] },
         { id: "doctors", label: "Doctors", icon: "fa-user-doctor", activeRoutes: ["doctors", "doctor-detail"] },
@@ -535,6 +639,533 @@ function renderNav() {
 
   logoutButton.classList.toggle("hidden", !state.session?.authenticated);
   updateInstallButtonVisibility();
+}
+
+function renderBookingWizard() {
+  const draft = state.bookingWizard;
+  app.innerHTML = `
+    <section class="booking-workspace">
+      ${renderBookingHero()}
+      <div class="booking-layout">
+        <article class="booking-wizard-panel">
+          ${renderWizardStepper()}
+          <div class="wizard-stage">
+            ${renderWizardBody(draft.step)}
+          </div>
+        </article>
+        ${renderWizardSidebar()}
+      </div>
+    </section>
+  `;
+}
+
+function renderBookingHero() {
+  const draft = state.bookingWizard;
+  const doctor = getWizardDoctor();
+  const hospital = getWizardHospital();
+  const slot = getWizardSelectedSlot();
+  return `
+    <section class="booking-hero">
+      <div class="booking-hero__copy">
+        <p class="eyebrow">Premium appointment desk</p>
+        <h3>Book care with confidence.</h3>
+        <p>Choose the right hospital, department, doctor, and queue slot through a guided hospital-grade booking flow.</p>
+        <div class="booking-hero__metrics">
+          <span><strong>${state.cities.length || 0}</strong> Cities</span>
+          <span><strong>${state.hospitals.length || "--"}</strong> Hospitals loaded</span>
+          <span><strong>${doctor ? "1" : "--"}</strong> Doctor selected</span>
+        </div>
+      </div>
+      <div class="booking-hero__summary">
+        <p class="eyebrow">Current selection</p>
+        <h4>${escapeHtml(doctor?.name || "No doctor selected")}</h4>
+        <p>${escapeHtml(hospital?.name || "Select a hospital to begin")}</p>
+        <div class="chip-row">
+          <span class="chip"><i class="fa-solid fa-calendar-day"></i>${draft.date ? formatDate(draft.date) : "Date pending"}</span>
+          <span class="chip"><i class="fa-regular fa-clock"></i>${slot ? slot.label : "Slot pending"}</span>
+        </div>
+      </div>
+    </section>
+  `;
+}
+
+function renderWizardStepper() {
+  const activeStep = Number(state.bookingWizard.step || 1);
+  return `
+    <div class="wizard-progress" aria-label="Booking progress">
+      <div class="wizard-progress__meta">
+        <span>Step ${activeStep} of ${BOOKING_WIZARD_STEPS.length}</span>
+        <strong>${escapeHtml(BOOKING_WIZARD_STEPS.find((step) => step.id === activeStep)?.label || "Booking")}</strong>
+      </div>
+      <div class="wizard-steps">
+        ${BOOKING_WIZARD_STEPS.map((step) => `
+          <button
+            class="wizard-step ${step.id === activeStep ? "active" : ""} ${step.id < activeStep ? "complete" : ""}"
+            data-action="wizard-step"
+            data-step="${step.id}"
+            type="button"
+            ${isWizardStepReachable(step.id) ? "" : "disabled"}
+            aria-label="Go to ${escapeAttribute(step.label)}"
+            aria-current="${step.id === activeStep ? "step" : "false"}"
+          >
+            <i class="fa-solid ${step.icon}"></i>
+            <span>${escapeHtml(step.label)}</span>
+          </button>
+        `).join("")}
+      </div>
+    </div>
+  `;
+}
+
+function renderWizardBody(step) {
+  if (step === 1) return renderWizardCityStep();
+  if (step === 2) return renderWizardHospitalStep();
+  if (step === 3) return renderWizardDepartmentStep();
+  if (step === 4) return renderWizardDoctorStep();
+  if (step === 5) return renderWizardScheduleStep();
+  if (step === 6) return renderWizardPatientStep();
+  if (step === 7) return renderWizardReviewStep();
+  return renderWizardCityStep();
+}
+
+function renderWizardCityStep() {
+  return `
+    <div class="wizard-screen">
+      <div class="section-header">
+        <div>
+          <p class="eyebrow">Step 1</p>
+          <h3>Where would you like to receive care?</h3>
+          <p>Select a city to unlock hospitals and doctor availability.</p>
+        </div>
+      </div>
+      <div class="premium-card-grid">
+        ${state.cities.length ? state.cities.map((city) => `
+          <button class="premium-select-card ${String(state.bookingWizard.cityId) === String(city.id) ? "selected" : ""}" data-action="wizard-select-city" data-city-id="${city.id}" type="button" aria-pressed="${String(state.bookingWizard.cityId) === String(city.id)}">
+            <span class="premium-select-card__icon"><i class="fa-solid fa-location-dot"></i></span>
+            <strong>${escapeHtml(city.name)}</strong>
+            <span>${city.hospital_count || 0} hospitals available</span>
+            <em>Priority OPD and specialist appointments</em>
+          </button>
+        `).join("") : renderWizardSkeletonCards(3)}
+      </div>
+    </div>
+  `;
+}
+
+function renderWizardHospitalStep() {
+  const draft = state.bookingWizard;
+  const hospitals = state.hospitals.filter((hospital) => {
+    const term = draft.hospitalSearch.toLowerCase();
+    return !term || hospital.name.toLowerCase().includes(term) || String(hospital.location || "").toLowerCase().includes(term);
+  });
+
+  return `
+    <div class="wizard-screen">
+      <div class="section-header">
+        <div>
+          <p class="eyebrow">Step 2</p>
+          <h3>Select a hospital</h3>
+          <p>Compare hospital access, OPD capacity, and front desk information.</p>
+        </div>
+        <div class="search-row compact-search">
+          <input id="bookingHospitalSearch" type="search" placeholder="Search hospitals or location" value="${escapeHtml(draft.hospitalSearch)}" aria-label="Search hospitals" />
+        </div>
+      </div>
+      <div class="hospital-premium-grid">
+        ${hospitals.length ? hospitals.map(renderPremiumHospitalCard).join("") : emptyState("No hospitals matched this city. Try a different search or go back to select another city.")}
+      </div>
+      ${renderWizardNavControls()}
+    </div>
+  `;
+}
+
+function renderPremiumHospitalCard(hospital) {
+  const meta = getHospitalMeta(hospital);
+  return `
+    <article class="hospital-premium-card ${String(state.bookingWizard.hospitalId) === String(hospital.id) ? "selected" : ""}">
+      <img src="${hospital.image || placeholderImage("hospital")}" alt="${escapeHtml(hospital.name)}" />
+      <div class="hospital-premium-card__body">
+        <div class="section-header">
+          <div>
+            <p class="eyebrow">${escapeHtml(hospital.city_name || getWizardCity()?.name || "Hospital")}</p>
+            <h3>${escapeHtml(hospital.name)}</h3>
+          </div>
+          <span class="rating-pill"><i class="fa-solid fa-star"></i>${meta.rating}</span>
+        </div>
+        <p class="card__meta"><i class="fa-solid fa-location-dot"></i>${escapeHtml(hospital.location || "Address not available")}</p>
+        <div class="chip-row">
+          <span class="chip"><i class="fa-solid fa-user-doctor"></i>${hospital.doctor_count || 0} doctors</span>
+          <span class="chip"><i class="fa-solid fa-road"></i>${meta.distance}</span>
+          <span class="chip"><i class="fa-solid fa-calendar-check"></i>${hospital.doctor_count ? "Available today" : "Availability pending"}</span>
+        </div>
+        <p class="hospital-specialties">${escapeHtml(meta.departments)}</p>
+        <div class="card__actions">
+          <button class="primary-button" data-action="wizard-select-hospital" data-hospital-id="${hospital.id}" type="button">
+            <i class="fa-solid fa-arrow-right"></i>
+            <span>Choose Hospital</span>
+          </button>
+          ${hospital.map_link ? `<a class="ghost-button link-button" href="${escapeAttribute(hospital.map_link)}" target="_blank" rel="noreferrer"><i class="fa-solid fa-map-location-dot"></i><span>Map</span></a>` : ""}
+        </div>
+      </div>
+    </article>
+  `;
+}
+
+function renderWizardDepartmentStep() {
+  const draft = state.bookingWizard;
+  const departments = getWizardDepartments().filter((department) => {
+    const term = draft.departmentSearch.toLowerCase();
+    return !term || department.name.toLowerCase().includes(term) || department.description.toLowerCase().includes(term);
+  });
+  const popular = getWizardDepartments().slice(0, 4);
+
+  return `
+    <div class="wizard-screen">
+      <div class="section-header">
+        <div>
+          <p class="eyebrow">Step 3</p>
+          <h3>Choose a department</h3>
+          <p>Pick the care area that best matches the reason for visit.</p>
+        </div>
+        <div class="search-row compact-search">
+          <input id="bookingDepartmentSearch" type="search" placeholder="Search departments" value="${escapeHtml(draft.departmentSearch)}" aria-label="Search departments" />
+        </div>
+      </div>
+      ${popular.length ? `<div class="popular-strip">${popular.map((department) => `<button class="chip" data-action="wizard-select-department" data-department-id="${department.id}" type="button"><i class="fa-solid ${department.icon}"></i>${escapeHtml(department.name)}</button>`).join("")}</div>` : ""}
+      <div class="premium-card-grid">
+        ${departments.length ? departments.map((department) => `
+          <button class="department-card ${String(draft.departmentId) === String(department.id) ? "selected" : ""}" data-action="wizard-select-department" data-department-id="${department.id}" type="button" aria-pressed="${String(draft.departmentId) === String(department.id)}">
+            <span class="premium-select-card__icon"><i class="fa-solid ${department.icon}"></i></span>
+            <strong>${escapeHtml(department.name)}</strong>
+            <span>${department.doctorCount} doctors available</span>
+            <em>${escapeHtml(department.description)}</em>
+          </button>
+        `).join("") : emptyState("No departments found for this hospital.")}
+      </div>
+      ${renderWizardNavControls()}
+    </div>
+  `;
+}
+
+function renderWizardDoctorStep() {
+  const draft = state.bookingWizard;
+  const doctors = getWizardDoctors().filter((doctor) => {
+    const term = draft.doctorSearch.toLowerCase();
+    const sameDepartment = !draft.departmentId || String(doctor.department_id || doctor.specialization) === String(draft.departmentId);
+    const matchesSearch =
+      !term ||
+      doctor.name.toLowerCase().includes(term) ||
+      String(doctor.specialization || "").toLowerCase().includes(term) ||
+      String(doctor.department_name || "").toLowerCase().includes(term);
+    return sameDepartment && matchesSearch;
+  });
+
+  return `
+    <div class="wizard-screen">
+      <div class="section-header">
+        <div>
+          <p class="eyebrow">Step 4</p>
+          <h3>Select your doctor</h3>
+          <p>Review experience, languages, fee estimate, and next expected availability.</p>
+        </div>
+        <div class="search-row compact-search">
+          <input id="bookingDoctorSearch" type="search" placeholder="Search doctors" value="${escapeHtml(draft.doctorSearch)}" aria-label="Search doctors" />
+        </div>
+      </div>
+      <div class="doctor-premium-grid">
+        ${doctors.length ? doctors.map(renderPremiumDoctorCard).join("") : emptyState("No doctors match this department. Try another department or search term.")}
+      </div>
+      ${renderWizardNavControls()}
+    </div>
+  `;
+}
+
+function renderPremiumDoctorCard(doctor) {
+  const meta = getDoctorMeta(doctor);
+  const availableToday = !isDoctorUnavailableOnDate(doctor, todayDate());
+  return `
+    <article class="doctor-premium-card ${String(state.bookingWizard.doctorId) === String(doctor.id) ? "selected" : ""}">
+      <img src="${doctor.image || placeholderImage("doctor")}" alt="${escapeHtml(doctor.name)}" />
+      <div class="doctor-premium-card__content">
+        <div class="section-header">
+          <div>
+            <p class="eyebrow">${escapeHtml(doctor.department_name || doctor.specialization || "Specialist")}</p>
+            <h3>${escapeHtml(doctor.name)}</h3>
+          </div>
+          <span class="rating-pill"><i class="fa-solid fa-star"></i>${meta.rating} (${meta.reviews})</span>
+        </div>
+        <p>${escapeHtml(meta.qualification)} - ${meta.experience} years experience</p>
+        <div class="chip-row">
+          <span class="chip"><i class="fa-solid fa-language"></i>${escapeHtml(meta.languages)}</span>
+          <span class="chip"><i class="fa-solid fa-indian-rupee-sign"></i>${meta.fee}</span>
+          <span class="chip"><i class="fa-solid fa-hospital"></i>${escapeHtml(doctor.hospital_name || getWizardHospital()?.name || "")}</span>
+          <span class="chip ${availableToday ? "chip-success" : ""}"><i class="fa-solid fa-calendar-check"></i>${availableToday ? "Available today" : "Unavailable today"}</span>
+        </div>
+        <div class="doctor-next-slot">
+          <strong>${escapeHtml(meta.nextSlot)}</strong>
+          <span>Estimated wait ${estimateWait(Number(doctor.booked_patients || 0))}</span>
+        </div>
+        <div class="card__actions">
+          <button class="primary-button" data-action="wizard-select-doctor" data-doctor-id="${doctor.id}" type="button">
+            <i class="fa-solid fa-calendar-plus"></i>
+            <span>Choose Doctor</span>
+          </button>
+          <button class="ghost-button" data-action="open-doctor-detail" data-doctor-id="${doctor.id}" type="button">
+            <i class="fa-solid fa-id-badge"></i>
+            <span>Profile</span>
+          </button>
+        </div>
+      </div>
+    </article>
+  `;
+}
+
+function renderWizardScheduleStep() {
+  const draft = state.bookingWizard;
+  const doctor = getWizardDoctor();
+  const slotResponse = getWizardSlotResponse();
+  return `
+    <div class="wizard-screen">
+      <div class="section-header">
+        <div>
+          <p class="eyebrow">Step 5</p>
+          <h3>Select date and time</h3>
+          <p>Unavailable dates and full slots are disabled. The hospital queue engine confirms the earliest available token.</p>
+        </div>
+      </div>
+      <div class="schedule-grid">
+        <div class="calendar-strip">
+          ${getCalendarDays(14).map((day) => {
+            const disabled = doctor && isDoctorUnavailableOnDate(doctor, day.value);
+            return `
+              <button class="calendar-day ${draft.date === day.value ? "selected" : ""}" data-action="wizard-select-date" data-date="${day.value}" type="button" ${disabled ? "disabled" : ""} aria-pressed="${draft.date === day.value}">
+                <span>${escapeHtml(day.weekday)}</span>
+                <strong>${day.day}</strong>
+                <em>${escapeHtml(day.month)}</em>
+              </button>
+            `;
+          }).join("")}
+        </div>
+        <div class="slot-panel">
+          ${draft.availabilityStatus === "loading" ? renderWizardSkeletonCards(3) : renderWizardSlotGroups(slotResponse)}
+        </div>
+      </div>
+      ${renderAppointmentConflict()}
+      ${renderWizardNavControls()}
+    </div>
+  `;
+}
+
+function renderWizardSlotGroups(slotResponse) {
+  if (!state.bookingWizard.date) {
+    return emptyState("Choose an appointment date to view available OPD tokens.");
+  }
+
+  if (!slotResponse) {
+    return emptyState(state.bookingWizard.availabilityMessage || "Select a date to check live availability.");
+  }
+
+  if (slotResponse.unavailable || slotResponse.limitReached) {
+    return emptyState(slotResponse.note || "No appointments are available on this date.");
+  }
+
+  const selectedSlot = getWizardSelectedSlot();
+  const groupedSlots = groupSlotsByDaypart(slotResponse.slots || []);
+  return `
+    <div class="recommended-slot">
+      <p class="eyebrow">Recommended earliest slot</p>
+      <h3>${slotResponse.nextSlot ? `Token ${slotResponse.nextSlot.slotNumber} - ${slotResponse.nextSlot.label}` : "No slots available"}</h3>
+      <p>${slotResponse.bookedPatients || 0}/${slotResponse.maxPatientsPerDay || "--"} bookings confirmed for this doctor.</p>
+    </div>
+    ${Object.entries(groupedSlots).map(([label, slots]) => `
+      <div class="slot-group">
+        <h4>${escapeHtml(label)}</h4>
+        <div class="slot-grid">
+          ${slots.map((slot) => {
+            const isRecommended = slotResponse.nextSlot && Number(slot.slotNumber) === Number(slotResponse.nextSlot.slotNumber);
+            const disabled = slot.isBooked || !isRecommended;
+            return `
+              <button
+                class="slot-choice ${selectedSlot?.slotNumber === slot.slotNumber ? "selected" : ""} ${isRecommended ? "recommended" : ""}"
+                data-action="wizard-select-slot"
+                data-slot-number="${slot.slotNumber}"
+                type="button"
+                ${disabled ? "disabled" : ""}
+                aria-pressed="${selectedSlot?.slotNumber === slot.slotNumber}"
+              >
+                <span>${escapeHtml(slot.label)}</span>
+                <strong>${slot.isBooked ? "Booked" : isRecommended ? "Recommended" : "Queue managed"}</strong>
+              </button>
+            `;
+          }).join("")}
+        </div>
+      </div>
+    `).join("")}
+  `;
+}
+
+function renderWizardPatientStep() {
+  const draft = state.bookingWizard;
+  const selectedFamilyMember = getSelectedFamilyMember();
+  const patientName = selectedFamilyMember?.name || draft.patientName || state.session?.user?.name || "";
+  const mobile = draft.mobile || state.session?.user?.phone || state.profile?.user?.phone || "";
+  return `
+    <div class="wizard-screen">
+      <div class="section-header">
+        <div>
+          <p class="eyebrow">Step 6</p>
+          <h3>Patient information</h3>
+          <p>Confirm contact details and visit reason for the hospital desk.</p>
+        </div>
+      </div>
+      <form class="patient-form-grid" data-form="booking-wizard-patient">
+        <div class="segmented-control" role="group" aria-label="Patient type">
+          <button class="${draft.patientType === "existing" ? "active" : ""}" data-action="wizard-patient-type" data-type="existing" type="button">Existing Patient</button>
+          <button class="${draft.patientType === "new" ? "active" : ""}" data-action="wizard-patient-type" data-type="new" type="button">New Patient</button>
+        </div>
+        <label>Booking for
+          <select id="bookingWizardFamilyMember" name="family_member_id">
+            ${renderFamilyMemberOptions(draft.familyMemberId)}
+          </select>
+        </label>
+        <label>Patient name
+          <input id="bookingWizardPatientName" type="text" value="${escapeHtml(patientName)}" placeholder="Patient full name" ${selectedFamilyMember ? "readonly" : ""} required />
+        </label>
+        <label>Mobile number
+          <input id="bookingWizardMobile" type="tel" value="${escapeHtml(mobile)}" placeholder="10-digit mobile number" required />
+        </label>
+        <label>Emergency contact
+          <input id="bookingWizardEmergencyContact" type="tel" value="${escapeHtml(draft.emergencyContact)}" placeholder="Optional alternate contact" />
+        </label>
+        <label>Priority
+          <select id="bookingWizardPriority">
+            <option value="normal" ${draft.priority === "normal" ? "selected" : ""}>Normal priority</option>
+            <option value="emergency" ${draft.priority === "emergency" ? "selected" : ""}>Emergency priority</option>
+          </select>
+        </label>
+        <label class="full">Reason for visit
+          <textarea id="bookingWizardReason" rows="4" placeholder="Describe symptoms or reason for consultation" required>${escapeHtml(draft.reasonForVisit)}</textarea>
+        </label>
+        <label class="full">Notes for hospital desk
+          <textarea id="bookingWizardNotes" rows="3" placeholder="Optional accessibility needs, reports to carry, or preferred instructions">${escapeHtml(draft.notes)}</textarea>
+        </label>
+        <p class="form-feedback" id="bookingWizardPatientFeedback" aria-live="polite">${escapeHtml(validateWizardStep(6))}</p>
+      </form>
+      ${renderWizardNavControls()}
+    </div>
+  `;
+}
+
+function renderWizardReviewStep() {
+  const summary = getBookingSummary();
+  const validationError = validateWizardStep(7);
+  return `
+    <div class="wizard-screen">
+      <div class="section-header">
+        <div>
+          <p class="eyebrow">Step 7</p>
+          <h3>Review and confirm</h3>
+          <p>Check every detail before sending the request to the hospital queue.</p>
+        </div>
+      </div>
+      <article class="review-card">
+        <div class="review-card__header">
+          <div>
+            <p class="eyebrow">Appointment summary</p>
+            <h3>${escapeHtml(summary.doctorName)}</h3>
+            <p>${escapeHtml(summary.departmentName)} at ${escapeHtml(summary.hospitalName)}</p>
+          </div>
+          <span class="success-ring"><i class="fa-solid fa-shield-heart"></i></span>
+        </div>
+        <div class="review-grid">
+          ${renderReviewItem("Hospital", summary.hospitalName, "fa-hospital")}
+          ${renderReviewItem("Department", summary.departmentName, "fa-stethoscope")}
+          ${renderReviewItem("Doctor", summary.doctorName, "fa-user-doctor")}
+          ${renderReviewItem("Date", summary.date, "fa-calendar-day")}
+          ${renderReviewItem("Time", summary.slotLabel, "fa-clock")}
+          ${renderReviewItem("Consultation Fee", summary.fee, "fa-indian-rupee-sign")}
+          ${renderReviewItem("Patient", summary.patientName, "fa-id-card")}
+          ${renderReviewItem("Booking For", summary.bookingFor, "fa-people-group")}
+          ${renderReviewItem("Notes", summary.notes || "No additional notes", "fa-notes-medical")}
+          ${renderReviewItem("Total Amount", summary.fee, "fa-receipt")}
+        </div>
+      </article>
+      ${validationError ? `<p class="form-feedback">${escapeHtml(validationError)}</p>` : ""}
+      <div class="wizard-actions">
+        <button class="ghost-button" data-action="wizard-back" type="button"><i class="fa-solid fa-arrow-left"></i><span>Back</span></button>
+        <button class="primary-button" data-action="wizard-confirm-booking" type="button" ${validationError ? "disabled" : ""}>
+          <i class="fa-solid fa-calendar-check"></i>
+          <span>Confirm Appointment</span>
+        </button>
+      </div>
+    </div>
+  `;
+}
+
+function renderWizardSidebar() {
+  const summary = getBookingSummary();
+  return `
+    <aside class="booking-sidebar">
+      <article class="booking-sidebar-card">
+        <p class="eyebrow">Care concierge</p>
+        <h3>${escapeHtml(summary.hospitalName || "Select hospital")}</h3>
+        <div class="sidebar-timeline">
+          ${BOOKING_WIZARD_STEPS.map((step) => `
+            <button class="${state.bookingWizard.step === step.id ? "active" : ""}" data-action="wizard-step" data-step="${step.id}" type="button" ${isWizardStepReachable(step.id) ? "" : "disabled"}>
+              <i class="fa-solid ${step.icon}"></i>
+              <span>${escapeHtml(step.label)}</span>
+            </button>
+          `).join("")}
+        </div>
+      </article>
+      <article class="booking-sidebar-card">
+        <p class="eyebrow">Smart suggestion</p>
+        <h3>${escapeHtml(summary.slotLabel || "Earliest available slot appears here")}</h3>
+        <p>${escapeHtml(summary.waitEstimate)}</p>
+        <div class="chip-row">
+          <span class="chip"><i class="fa-solid fa-star"></i>Recommended doctors highlighted</span>
+          <span class="chip"><i class="fa-solid fa-envelope"></i>Email confirmation enabled</span>
+        </div>
+      </article>
+    </aside>
+  `;
+}
+
+function renderWizardNavControls() {
+  const step = Number(state.bookingWizard.step || 1);
+  const validationError = validateWizardStep(step);
+  return `
+    <div class="wizard-actions">
+      <button class="ghost-button" data-action="wizard-back" type="button" ${step === 1 ? "disabled" : ""}>
+        <i class="fa-solid fa-arrow-left"></i>
+        <span>Back</span>
+      </button>
+      <button class="secondary-button" data-action="wizard-reset" type="button">
+        <i class="fa-solid fa-rotate-left"></i>
+        <span>Start Over</span>
+      </button>
+      <button class="primary-button" data-action="wizard-next" type="button" ${validationError ? "disabled" : ""}>
+        <span>${step === 6 ? "Review Booking" : "Continue"}</span>
+        <i class="fa-solid fa-arrow-right"></i>
+      </button>
+    </div>
+    ${validationError ? `<p class="form-feedback">${escapeHtml(validationError)}</p>` : ""}
+  `;
+}
+
+function renderReviewItem(label, value, icon) {
+  return `
+    <div class="review-item">
+      <span><i class="fa-solid ${icon}"></i>${escapeHtml(label)}</span>
+      <strong>${escapeHtml(value || "Pending")}</strong>
+    </div>
+  `;
+}
+
+function renderWizardSkeletonCards(count = 3) {
+  return Array.from({ length: count })
+    .map(() => `<div class="wizard-skeleton"><span></span><strong></strong><em></em></div>`)
+    .join("");
 }
 
 function renderCities() {
@@ -1203,13 +1834,33 @@ function renderFamilyMembersSection() {
 
 async function renderConfirmation() {
   if (!state.latestAppointment) {
-    state.route = "cities";
+    state.route = "booking";
     return render();
   }
   const queue = await loadQueue().catch(() => null);
   const appointment = state.latestAppointment;
   app.innerHTML = `
-    <section class="page-grid">
+    <section class="page-grid confirmation-premium">
+      <article class="confirmation-hero">
+        <div class="success-animation" aria-hidden="true">
+          <i class="fa-solid fa-check"></i>
+        </div>
+        <div>
+          <p class="eyebrow">Booking confirmed</p>
+          <h3>Your appointment is reserved</h3>
+          <p>Appointment ID PC-${String(appointment.id).padStart(6, "0")} has been sent to ${escapeHtml(state.session.user.email || "your account")}.</p>
+          <div class="form-actions">
+            <button class="primary-button" type="button" data-action="print-current-slip"><i class="fa-solid fa-print"></i><span>Print Slip</span></button>
+            <button class="secondary-button" type="button" data-action="download-current-slip"><i class="fa-solid fa-download"></i><span>Download Slip</span></button>
+            <button class="ghost-button" type="button" data-action="add-current-calendar"><i class="fa-solid fa-calendar-plus"></i><span>Add to Calendar</span></button>
+            <button class="ghost-button" type="button" data-action="wizard-book-another"><i class="fa-solid fa-plus"></i><span>Book Another</span></button>
+          </div>
+        </div>
+        <div class="qr-placeholder" aria-label="QR code placeholder">
+          <span></span><span></span><span></span><span></span>
+          <strong>QR</strong>
+        </div>
+      </article>
       <div class="stat-grid">
         <article class="stat-card"><p class="eyebrow">Hospital</p><strong>${escapeHtml(appointment.hospital_name)}</strong><span>${escapeHtml(appointment.hospital_location)}</span></article>
         <article class="stat-card"><p class="eyebrow">Doctor</p><strong>${escapeHtml(appointment.doctor_name)}</strong><span>${escapeHtml(appointment.department_name || appointment.specialization || "")}</span></article>
@@ -1239,6 +1890,11 @@ async function renderConfirmation() {
             ${appointment.visit_notes ? `<p class="card__meta"><i class="fa-solid fa-file-waveform"></i> ${escapeHtml(appointment.visit_notes)}</p>` : ""}
           </div>
           <div class="list-card"><p class="eyebrow">Token number</p><div class="queue-pill">${appointment.token_number}</div><div class="chip-row">${priorityBadge(appointment.priority)}${statusBadge(appointment.status)}</div></div>
+          <div class="list-card">
+            <p class="eyebrow">Email confirmation</p>
+            <h3>Ready</h3>
+            <p>Reminder email will be sent automatically when SMTP is configured.</p>
+          </div>
         </div>
       </article>
       <article class="queue-card">
@@ -1777,6 +2433,9 @@ async function handleClick(event) {
     if (state.route === "admin") await loadAdminData();
     if (state.route === "admin-board") await Promise.all([loadAdminBoard(), loadAdminData()]);
     if (state.route === "appointments") await loadMyAppointments();
+    if (state.route === "booking") {
+      await loadBookingWizardData();
+    }
     if (state.route === "profile") await Promise.all([loadProfile(), loadMyAppointments()]);
     if (state.route === "notifications") await loadNotifications({ markRead: true });
     if (state.route === "confirmation" && state.latestAppointment?.id) {
@@ -1790,6 +2449,8 @@ async function handleClick(event) {
       history.replaceState({}, "", "/admin");
     } else if (state.route === "admin-board") {
       history.replaceState({}, "", "/admin/board");
+    } else if (state.route === "booking") {
+      history.replaceState({}, "", "/dashboard");
     } else if (!["doctor-today", "doctor-detail", "hospital-detail"].includes(state.route)) {
       history.replaceState({}, "", "/");
     }
@@ -1812,6 +2473,150 @@ async function handleClick(event) {
 
   if (!actionTarget) return;
   const action = actionTarget.dataset.action;
+
+  if (action === "wizard-step") {
+    const step = Number(actionTarget.dataset.step);
+    if (!isWizardStepReachable(step)) return;
+    updateBookingDraft({ step });
+    render();
+    return;
+  }
+
+  if (action === "wizard-next") {
+    const error = validateWizardStep(state.bookingWizard.step);
+    if (error) {
+      showToast(error, "error");
+      return;
+    }
+    updateBookingDraft({ step: Math.min(Number(state.bookingWizard.step || 1) + 1, BOOKING_WIZARD_STEPS.length) });
+    render();
+    return;
+  }
+
+  if (action === "wizard-back") {
+    updateBookingDraft({ step: Math.max(Number(state.bookingWizard.step || 1) - 1, 1) });
+    render();
+    return;
+  }
+
+  if (action === "wizard-reset") {
+    state.bookingWizard = createDefaultBookingDraft();
+    persistBookingDraft();
+    render();
+    showToast("Booking draft cleared.");
+    return;
+  }
+
+  if (action === "wizard-select-city") {
+    const cityId = actionTarget.dataset.cityId;
+    const city = state.cities.find((item) => String(item.id) === String(cityId));
+    updateBookingDraft({
+      cityId,
+      hospitalId: "",
+      departmentId: "",
+      doctorId: "",
+      date: "",
+      selectedSlotNumber: "",
+      expectedSlot: null,
+      step: 2,
+    });
+    state.selectedCity = city ? { id: Number(city.id), name: city.name } : null;
+    state.hospitals = [];
+    await loadHospitals(cityId);
+    render();
+    return;
+  }
+
+  if (action === "wizard-select-hospital") {
+    const hospitalId = actionTarget.dataset.hospitalId;
+    const hospital = state.hospitals.find((item) => String(item.id) === String(hospitalId));
+    updateBookingDraft({
+      hospitalId,
+      departmentId: "",
+      doctorId: "",
+      date: "",
+      selectedSlotNumber: "",
+      expectedSlot: null,
+      step: 3,
+    });
+    state.selectedHospital = hospital || state.selectedHospital;
+    await loadHospitalDetail(hospitalId);
+    await loadWizardDoctorDirectory();
+    render();
+    return;
+  }
+
+  if (action === "wizard-select-department") {
+    updateBookingDraft({
+      departmentId: actionTarget.dataset.departmentId,
+      doctorId: "",
+      date: "",
+      selectedSlotNumber: "",
+      expectedSlot: null,
+      step: 4,
+    });
+    render();
+    return;
+  }
+
+  if (action === "wizard-select-doctor") {
+    updateBookingDraft({
+      doctorId: actionTarget.dataset.doctorId,
+      date: "",
+      selectedSlotNumber: "",
+      expectedSlot: null,
+      step: 5,
+    });
+    render();
+    return;
+  }
+
+  if (action === "wizard-select-date") {
+    await loadWizardSlots(actionTarget.dataset.date);
+    render();
+    return;
+  }
+
+  if (action === "wizard-select-slot") {
+    const slotResponse = getWizardSlotResponse();
+    const slot = slotResponse?.slots?.find((item) => String(item.slotNumber) === String(actionTarget.dataset.slotNumber));
+    updateBookingDraft({
+      selectedSlotNumber: actionTarget.dataset.slotNumber,
+      expectedSlot: slot || slotResponse?.nextSlot || null,
+    });
+    render();
+    return;
+  }
+
+  if (action === "wizard-patient-type") {
+    updateBookingDraft({ patientType: actionTarget.dataset.type });
+    render();
+    return;
+  }
+
+  if (action === "wizard-confirm-booking") {
+    await confirmWizardBooking();
+    return;
+  }
+
+  if (action === "wizard-book-another") {
+    state.bookingWizard = createDefaultBookingDraft();
+    persistBookingDraft();
+    state.route = "booking";
+    history.replaceState({}, "", "/dashboard");
+    render();
+    return;
+  }
+
+  if (action === "download-current-slip") {
+    downloadAppointmentSlip(state.latestAppointment);
+    return;
+  }
+
+  if (action === "add-current-calendar") {
+    downloadAppointmentCalendar(state.latestAppointment);
+    return;
+  }
 
   if (action === "open-profile") {
     await openProfilePage();
@@ -2175,6 +2980,48 @@ async function handleSubmit(event) {
 }
 
 function handleInput(event) {
+  if (event.target.id === "bookingHospitalSearch") {
+    updateBookingDraft({ hospitalSearch: event.target.value });
+    render();
+    return;
+  }
+
+  if (event.target.id === "bookingDepartmentSearch") {
+    updateBookingDraft({ departmentSearch: event.target.value });
+    render();
+    return;
+  }
+
+  if (event.target.id === "bookingDoctorSearch") {
+    updateBookingDraft({ doctorSearch: event.target.value });
+    render();
+    return;
+  }
+
+  if (event.target.id === "bookingWizardPatientName") {
+    updateBookingDraft({ patientName: event.target.value });
+    updateWizardPatientFeedback();
+  }
+
+  if (event.target.id === "bookingWizardMobile") {
+    updateBookingDraft({ mobile: event.target.value });
+    updateWizardPatientFeedback();
+  }
+
+  if (event.target.id === "bookingWizardEmergencyContact") {
+    updateBookingDraft({ emergencyContact: event.target.value });
+    updateWizardPatientFeedback();
+  }
+
+  if (event.target.id === "bookingWizardReason") {
+    updateBookingDraft({ reasonForVisit: event.target.value });
+    updateWizardPatientFeedback();
+  }
+
+  if (event.target.id === "bookingWizardNotes") {
+    updateBookingDraft({ notes: event.target.value });
+  }
+
   if (event.target.id === "hospitalSearch") {
     const term = event.target.value.toLowerCase().trim();
     const filtered = state.hospitals.filter(
@@ -2192,6 +3039,23 @@ function handleInput(event) {
 }
 
 async function handleChange(event) {
+  if (event.target.id === "bookingWizardFamilyMember") {
+    updateBookingDraft({
+      familyMemberId: event.target.value,
+      bookingFor: event.target.value ? "family" : "self",
+      patientName: event.target.value
+        ? state.familyMembers.find((member) => String(member.id) === String(event.target.value))?.name || ""
+        : state.session?.user?.name || "",
+    });
+    render();
+    return;
+  }
+
+  if (event.target.id === "bookingWizardPriority") {
+    updateBookingDraft({ priority: event.target.value });
+    return;
+  }
+
   if (event.target.id === "doctorCityFilter") {
     state.filters.cityId = event.target.value;
     if (state.filters.hospitalId && !getCurrentHospitalOptions().find((item) => String(item.id) === String(state.filters.hospitalId))) {
@@ -2377,6 +3241,359 @@ function setFormFeedback(form, message) {
 function clearFormFeedback(form) {
   const node = form.querySelector(".form-feedback");
   if (node) node.textContent = "";
+}
+
+function getWizardCity() {
+  return state.cities.find((city) => String(city.id) === String(state.bookingWizard.cityId)) || null;
+}
+
+function getWizardHospital() {
+  return (
+    state.hospitalDetail?.id && String(state.hospitalDetail.id) === String(state.bookingWizard.hospitalId)
+      ? state.hospitalDetail
+      : state.hospitals.find((hospital) => String(hospital.id) === String(state.bookingWizard.hospitalId))
+  ) || null;
+}
+
+function getWizardDoctors() {
+  const hospitalDoctors = state.hospitalDetail?.doctors || [];
+  const source = state.doctorDirectory.length ? state.doctorDirectory : hospitalDoctors.length ? hospitalDoctors : state.doctors;
+  return source.filter((doctor) => {
+    if (!state.bookingWizard.hospitalId) return true;
+    return String(doctor.hospital_id) === String(state.bookingWizard.hospitalId);
+  });
+}
+
+function getWizardDoctor() {
+  return getWizardDoctors().find((doctor) => String(doctor.id) === String(state.bookingWizard.doctorId)) || null;
+}
+
+function getWizardDepartments() {
+  const departments = new Map();
+  getWizardDoctors().forEach((doctor) => {
+    const id = doctor.department_id || doctor.specialization || "general";
+    const name = doctor.department_name || doctor.specialization || "General Medicine";
+    const existing = departments.get(String(id));
+    departments.set(String(id), {
+      id,
+      name,
+      doctorCount: (existing?.doctorCount || 0) + 1,
+      icon: getDepartmentIcon(name),
+      description: getDepartmentDescription(name),
+    });
+  });
+  return Array.from(departments.values()).sort((left, right) => right.doctorCount - left.doctorCount);
+}
+
+function getWizardDepartment() {
+  return getWizardDepartments().find((department) => String(department.id) === String(state.bookingWizard.departmentId)) || null;
+}
+
+function getWizardSlotResponse() {
+  if (!state.bookingWizard.doctorId || !state.bookingWizard.date) return null;
+  return state.slotAvailability[getSlotCacheKey(state.bookingWizard.doctorId, state.bookingWizard.date)] || null;
+}
+
+function getWizardSelectedSlot() {
+  const slotResponse = getWizardSlotResponse();
+  if (!slotResponse) return state.bookingWizard.expectedSlot;
+  return (
+    slotResponse.slots?.find((slot) => String(slot.slotNumber) === String(state.bookingWizard.selectedSlotNumber)) ||
+    slotResponse.nextSlot ||
+    state.bookingWizard.expectedSlot
+  );
+}
+
+function getSelectedFamilyMember() {
+  return state.familyMembers.find((member) => String(member.id) === String(state.bookingWizard.familyMemberId)) || null;
+}
+
+function getHospitalMeta(hospital) {
+  const departments = getWizardDoctors()
+    .filter((doctor) => String(doctor.hospital_id) === String(hospital.id))
+    .map((doctor) => doctor.department_name || doctor.specialization)
+    .filter(Boolean);
+  return {
+    rating: (4.4 + (hashNumber(hospital.name) % 5) / 10).toFixed(1),
+    distance: "Distance unavailable",
+    departments: departments.length
+      ? [...new Set(departments)].slice(0, 4).join(", ")
+      : "Multi-specialty OPD, diagnostics, emergency support",
+  };
+}
+
+function getDoctorMeta(doctor) {
+  const seed = hashNumber(`${doctor.id}-${doctor.name}`);
+  const qualifications = ["MBBS, MD", "MBBS, MS", "MBBS, DNB", "MD, Fellowship"];
+  const languages = ["English, Hindi", "English, Hindi, Marathi", "English, Hindi, Kannada", "English, Hindi, Tamil"];
+  return {
+    qualification: qualifications[seed % qualifications.length],
+    experience: 8 + (seed % 18),
+    languages: languages[seed % languages.length],
+    fee: 500 + (seed % 7) * 100,
+    rating: (4.3 + (seed % 7) / 10).toFixed(1),
+    reviews: 80 + (seed % 420),
+    nextSlot: isDoctorUnavailableOnDate(doctor, todayDate())
+      ? "Next available after weekly off"
+      : `Today after ${formatTime(doctor.available_from || APPOINTMENT_SLOT_START_TIME)}`,
+  };
+}
+
+function getBookingSummary() {
+  const draft = state.bookingWizard;
+  const hospital = getWizardHospital();
+  const department = getWizardDepartment();
+  const doctor = getWizardDoctor();
+  const slot = getWizardSelectedSlot();
+  const familyMember = getSelectedFamilyMember();
+  const patientName = familyMember?.name || draft.patientName || state.session?.user?.name || "";
+  const doctorMeta = doctor ? getDoctorMeta(doctor) : null;
+  return {
+    hospitalName: hospital?.name || "",
+    departmentName: department?.name || doctor?.department_name || doctor?.specialization || "",
+    doctorName: doctor?.name || "",
+    date: draft.date ? formatDate(draft.date) : "",
+    slotLabel: slot?.label || draft.expectedSlot?.label || "",
+    fee: doctorMeta ? `Rs. ${doctorMeta.fee}` : "Shown after doctor selection",
+    patientName,
+    bookingFor: familyMember ? `${familyMember.name} (${familyMember.relation})` : "Self",
+    notes: draft.notes,
+    waitEstimate: slot ? `Estimated wait starts around ${slot.label}.` : "Earliest available token will be recommended after date selection.",
+  };
+}
+
+function validateWizardStep(step) {
+  const draft = state.bookingWizard;
+  if (step >= 1 && !draft.cityId) return "Select a city to continue.";
+  if (step >= 2 && !draft.hospitalId) return "Select a hospital to continue.";
+  if (step >= 3 && !draft.departmentId) return "Select a department to continue.";
+  if (step >= 4 && !draft.doctorId) return "Select a doctor to continue.";
+  if (step >= 5 && (!draft.date || !getWizardSelectedSlot())) return "Select an available appointment date and recommended slot.";
+  if (step >= 6) {
+    const familyMember = getSelectedFamilyMember();
+    const patientName = familyMember?.name || draft.patientName || state.session?.user?.name || "";
+    const mobile = draft.mobile || state.session?.user?.phone || state.profile?.user?.phone || "";
+    if (!patientName.trim()) return "Patient name is required.";
+    if (!/^[0-9]{10}$/.test(String(mobile || "").replace(/\D/g, ""))) return "Enter a valid 10-digit mobile number.";
+    if (draft.emergencyContact && !/^[0-9]{10}$/.test(String(draft.emergencyContact || "").replace(/\D/g, ""))) {
+      return "Enter a valid 10-digit emergency contact or leave it blank.";
+    }
+    if (!draft.reasonForVisit.trim()) return "Reason for visit is required.";
+  }
+  return "";
+}
+
+function updateWizardPatientFeedback() {
+  const feedback = document.getElementById("bookingWizardPatientFeedback");
+  if (feedback) {
+    feedback.textContent = validateWizardStep(6);
+  }
+}
+
+function isWizardStepReachable(step) {
+  if (step <= state.bookingWizard.step) return true;
+  return !validateWizardStep(step - 1);
+}
+
+function getCalendarDays(count) {
+  const start = new Date(`${todayDate()}T12:00:00`);
+  return Array.from({ length: count }).map((_, index) => {
+    const date = new Date(start);
+    date.setDate(start.getDate() + index);
+    const value = date.toISOString().slice(0, 10);
+    return {
+      value,
+      weekday: date.toLocaleDateString(undefined, { weekday: "short" }),
+      day: date.toLocaleDateString(undefined, { day: "2-digit" }),
+      month: date.toLocaleDateString(undefined, { month: "short" }),
+    };
+  });
+}
+
+function groupSlotsByDaypart(slots) {
+  return slots.reduce(
+    (groups, slot) => {
+      const hour = Number(String(slot.startTime || "00:00").split(":")[0]);
+      const group = hour < 12 ? "Morning" : hour < 17 ? "Afternoon" : "Evening";
+      groups[group].push(slot);
+      return groups;
+    },
+    { Morning: [], Afternoon: [], Evening: [] }
+  );
+}
+
+function renderAppointmentConflict() {
+  const conflict = getAppointmentConflict(state.bookingWizard.date);
+  if (!conflict) return "";
+  return `
+    <div class="warning-strip">
+      <i class="fa-solid fa-triangle-exclamation"></i>
+      <span>You already have an appointment with ${escapeHtml(conflict.doctor_name)} on ${formatDate(conflict.appointment_date)}.</span>
+    </div>
+  `;
+}
+
+function getAppointmentConflict(date) {
+  if (!date) return null;
+  return [...state.myAppointments.upcoming, ...state.myAppointments.past].find(
+    (appointment) =>
+      appointment.appointment_date === date &&
+      !["cancelled", "completed", "skipped"].includes(String(appointment.status || "").toLowerCase())
+  );
+}
+
+async function loadWizardDoctorDirectory() {
+  state.filters.cityId = String(state.bookingWizard.cityId || "");
+  state.filters.hospitalId = String(state.bookingWizard.hospitalId || "");
+  state.filters.departmentId = "";
+  state.filters.specialization = "";
+  state.filters.day = "";
+  state.filters.search = "";
+  await loadDoctorDirectory();
+}
+
+async function loadBookingWizardData() {
+  if (state.bookingWizard.cityId && !state.hospitals.length) {
+    await loadHospitals(state.bookingWizard.cityId);
+  }
+
+  if (
+    state.bookingWizard.hospitalId &&
+    String(state.hospitalDetail?.id || "") !== String(state.bookingWizard.hospitalId)
+  ) {
+    await loadHospitalDetail(state.bookingWizard.hospitalId);
+  }
+
+  if (state.bookingWizard.hospitalId) {
+    await loadWizardDoctorDirectory();
+  }
+
+  if (
+    state.bookingWizard.doctorId &&
+    state.bookingWizard.date &&
+    !getWizardSlotResponse()
+  ) {
+    try {
+      const slotResponse = await loadDoctorSlots(state.bookingWizard.doctorId, state.bookingWizard.date);
+      updateBookingDraft({
+        selectedSlotNumber: state.bookingWizard.selectedSlotNumber || slotResponse.nextSlot?.slotNumber || "",
+        expectedSlot: state.bookingWizard.expectedSlot || slotResponse.nextSlot || null,
+        availabilityStatus: "ready",
+        availabilityMessage: slotResponse.note || "",
+      });
+    } catch (error) {
+      updateBookingDraft({
+        selectedSlotNumber: "",
+        expectedSlot: null,
+        availabilityStatus: "error",
+        availabilityMessage: error.message || "Unable to refresh saved appointment availability.",
+      });
+    }
+  }
+}
+
+async function loadWizardSlots(date) {
+  updateBookingDraft({
+    date,
+    selectedSlotNumber: "",
+    expectedSlot: null,
+    availabilityStatus: "loading",
+    availabilityMessage: "",
+  });
+  render();
+  try {
+    const slotResponse = await loadDoctorSlots(state.bookingWizard.doctorId, date);
+    updateBookingDraft({
+      selectedSlotNumber: slotResponse.nextSlot?.slotNumber || "",
+      expectedSlot: slotResponse.nextSlot || null,
+      availabilityStatus: "ready",
+      availabilityMessage: slotResponse.note || "",
+    });
+    if (!state.myAppointments.upcoming.length && !state.myAppointments.past.length) {
+      await loadMyAppointments().catch(() => {});
+    }
+  } catch (error) {
+    updateBookingDraft({
+      selectedSlotNumber: "",
+      expectedSlot: null,
+      availabilityStatus: "error",
+      availabilityMessage: error.message || "Unable to load live availability. Please try another date.",
+    });
+    showToast(state.bookingWizard.availabilityMessage, "error");
+  }
+}
+
+async function confirmWizardBooking() {
+  const draft = state.bookingWizard;
+  const familyMember = getSelectedFamilyMember();
+  const patientName = familyMember?.name || draft.patientName || state.session?.user?.name || "";
+  const mobile = draft.mobile || state.session?.user?.phone || state.profile?.user?.phone || "";
+  const data = {
+    doctor_id: draft.doctorId,
+    hospital_id: draft.hospitalId,
+    family_member_id: draft.familyMemberId,
+    name: patientName,
+    mobile,
+    date: draft.date,
+    priority: draft.priority,
+    reason_for_visit: draft.reasonForVisit,
+  };
+  const validationError = validateBookingData(data);
+  if (validationError) {
+    showToast(validationError, "error");
+    return;
+  }
+  setLoading(true);
+  try {
+    const booking = await apiFetch("/book", { method: "POST", body: JSON.stringify(data) });
+    state.slotAvailability = {};
+    await loadAppointmentDetails(booking.id);
+    await loadMyAppointments();
+    await loadNotifications();
+    if (state.session?.user) {
+      state.session.user.phone = mobile;
+    }
+    state.bookingWizard = {
+      ...createDefaultBookingDraft(),
+      cityId: draft.cityId,
+      hospitalId: draft.hospitalId,
+      patientName,
+      mobile,
+    };
+    persistBookingDraft();
+    state.route = "confirmation";
+    history.replaceState({}, "", `/?appointment=${booking.id}`);
+    render();
+    showToast(`Appointment booked. Your token is ${booking.token_number}.`);
+  } catch (error) {
+    showToast(error.message || "Unable to confirm appointment. Please try again.", "error");
+  } finally {
+    setLoading(false);
+  }
+}
+
+function getDepartmentIcon(name) {
+  const value = String(name || "").toLowerCase();
+  if (value.includes("cardio")) return "fa-heart-pulse";
+  if (value.includes("ortho") || value.includes("bone")) return "fa-bone";
+  if (value.includes("neuro")) return "fa-brain";
+  if (value.includes("child") || value.includes("pedia")) return "fa-child-reaching";
+  if (value.includes("skin") || value.includes("derma")) return "fa-hand-sparkles";
+  return "fa-stethoscope";
+}
+
+function getDepartmentDescription(name) {
+  const value = String(name || "").toLowerCase();
+  if (value.includes("cardio")) return "Heart, blood pressure, chest pain, and cardiac follow-up care.";
+  if (value.includes("ortho") || value.includes("bone")) return "Bones, joints, fractures, sports injuries, and mobility care.";
+  if (value.includes("neuro")) return "Brain, spine, nerve, headache, and seizure-related consultation.";
+  return "Specialist consultation, diagnosis, follow-up, and OPD care.";
+}
+
+function hashNumber(value) {
+  return String(value || "")
+    .split("")
+    .reduce((total, character) => total + character.charCodeAt(0), 0);
 }
 
 function validateBookingData(data) {
@@ -2674,6 +3891,70 @@ function printAppointmentSlip(appointment) {
     </html>
   `);
   win.document.close();
+}
+
+function downloadAppointmentSlip(appointment) {
+  if (!appointment) return;
+  const lines = [
+    "PulseCare HMS Appointment Slip",
+    `Appointment ID: PC-${String(appointment.id).padStart(6, "0")}`,
+    `Hospital: ${appointment.hospital_name}`,
+    `Doctor: ${appointment.doctor_name}`,
+    `Department: ${appointment.department_name || appointment.specialization || ""}`,
+    `Date: ${formatDate(appointment.appointment_date)}`,
+    `Time Slot: ${formatAppointmentSlot(appointment)}`,
+    `Token: ${appointment.token_number}`,
+    `Priority: ${formatPriorityLabel(appointment.priority)}`,
+    `Patient: ${appointment.user_name}`,
+    `Mobile: ${appointment.mobile || ""}`,
+    `Location: ${appointment.hospital_location || ""}`,
+  ];
+  downloadTextFile(
+    `appointment-PC-${String(appointment.id).padStart(6, "0")}.txt`,
+    lines.join("\n")
+  );
+}
+
+function downloadAppointmentCalendar(appointment) {
+  if (!appointment) return;
+  const start = getCalendarDateTime(appointment.appointment_date, appointment.slot_start || APPOINTMENT_SLOT_START_TIME);
+  const end = getCalendarDateTime(appointment.appointment_date, appointment.slot_end || "10:15");
+  const content = [
+    "BEGIN:VCALENDAR",
+    "VERSION:2.0",
+    "PRODID:-//PulseCare HMS//Appointment//EN",
+    "BEGIN:VEVENT",
+    `UID:pulsecare-${appointment.id}@hms`,
+    `DTSTAMP:${toIcsDateTime(new Date())}`,
+    `DTSTART:${toIcsDateTime(start)}`,
+    `DTEND:${toIcsDateTime(end)}`,
+    `SUMMARY:Appointment with ${appointment.doctor_name}`,
+    `LOCATION:${appointment.hospital_name}, ${appointment.hospital_location || ""}`,
+    `DESCRIPTION:Token ${appointment.token_number}. Patient ${appointment.user_name}.`,
+    "END:VEVENT",
+    "END:VCALENDAR",
+  ].join("\r\n");
+  downloadTextFile(`appointment-PC-${String(appointment.id).padStart(6, "0")}.ics`, content);
+}
+
+function downloadTextFile(filename, content) {
+  const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  URL.revokeObjectURL(link.href);
+  link.remove();
+}
+
+function getCalendarDateTime(dateValue, timeValue) {
+  const [hours, minutes] = String(timeValue || "00:00").slice(0, 5).split(":");
+  return new Date(`${dateValue}T${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:00`);
+}
+
+function toIcsDateTime(date) {
+  return date.toISOString().replace(/[-:]/g, "").split(".")[0] + "Z";
 }
 
 function downloadAdminAppointmentsCsv() {

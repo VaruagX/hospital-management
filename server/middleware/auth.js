@@ -1,4 +1,4 @@
-const ADMIN_EMAIL = "gauravkale216@gmail.com";
+const { isAdminEmail } = require("../config/runtime");
 
 function isStaffUser(user) {
   return Boolean(
@@ -20,7 +20,10 @@ function requireAdmin(req, res, next) {
     return res.status(401).json({ error: "Authentication required" });
   }
 
-  if (String(req.user.role || "").toLowerCase() === "admin" || req.user.email === ADMIN_EMAIL) {
+  if (
+    String(req.user.role || "").toLowerCase() === "admin" ||
+    isAdminEmail(req.user.email)
+  ) {
     return next();
   }
 
@@ -32,7 +35,7 @@ function requireStaff(req, res, next) {
     return res.status(401).json({ error: "Authentication required" });
   }
 
-  if (req.user.email === ADMIN_EMAIL || isStaffUser(req.user)) {
+  if (isAdminEmail(req.user.email) || isStaffUser(req.user)) {
     return next();
   }
 

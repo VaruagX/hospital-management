@@ -1133,18 +1133,669 @@ body.is-login {
   line-height: 1.62;
 }
 
-.login-google-button {
-  width: min(100%, 460px);
-  min-height: 58px;
-  margin-top: 58px;
-  padding: 14px 18px;
-  font-size: 1.08rem;
-}
+	.login-google-button {
+	  width: min(100%, 460px);
+	  min-height: 58px;
+	  margin-top: 58px;
+	  padding: 14px 18px;
+	  font-size: 1.08rem;
+	}
 
-@keyframes spin {
-  to {
-    transform: rotate(360deg);
-  }
+	.booking-workspace,
+	.booking-layout,
+	.wizard-screen,
+	.booking-sidebar,
+	.sidebar-timeline,
+	.slot-group,
+	.confirmation-premium {
+	  display: grid;
+	  gap: 20px;
+	}
+
+	.booking-hero,
+	.booking-wizard-panel,
+	.booking-sidebar-card,
+	.confirmation-hero,
+	.review-card,
+	.hospital-premium-card,
+	.doctor-premium-card,
+	.recommended-slot,
+	.warning-strip {
+	  border: 1px solid var(--line);
+	  background: var(--panel);
+	  box-shadow: var(--shadow-soft);
+	  backdrop-filter: blur(18px);
+	}
+
+	.booking-hero {
+	  display: grid;
+	  grid-template-columns: minmax(0, 1.25fr) minmax(280px, 0.75fr);
+	  gap: 20px;
+	  min-height: 310px;
+	  overflow: hidden;
+	  border-radius: 28px;
+	  background:
+	    linear-gradient(90deg, rgba(15, 23, 42, 0.88), rgba(15, 23, 42, 0.62)),
+	    url("https://images.unsplash.com/photo-1579684385127-1ef15d508118?auto=format&fit=crop&w=1600&q=80") center / cover;
+	  color: #ffffff;
+	}
+
+	.booking-hero__copy,
+	.booking-hero__summary {
+	  padding: clamp(22px, 4vw, 42px);
+	}
+
+	.booking-hero__copy {
+	  display: flex;
+	  flex-direction: column;
+	  justify-content: center;
+	}
+
+	.booking-hero__copy .eyebrow,
+	.booking-hero__copy p,
+	.booking-hero__summary .eyebrow,
+	.booking-hero__summary p,
+	.booking-hero .chip {
+	  color: rgba(255, 255, 255, 0.82);
+	}
+
+	.booking-hero h3 {
+	  margin: 0;
+	  font-family: "Space Grotesk", sans-serif;
+	  font-size: clamp(2.5rem, 5vw, 4.8rem);
+	  line-height: 1;
+	}
+
+	.booking-hero__copy > p {
+	  max-width: 680px;
+	  margin: 18px 0 0;
+	  font-size: 1.08rem;
+	  line-height: 1.6;
+	}
+
+	.booking-hero__metrics,
+	.booking-hero__summary {
+	  display: flex;
+	  gap: 14px;
+	}
+
+	.booking-hero__metrics {
+	  flex-wrap: wrap;
+	  margin-top: 28px;
+	}
+
+	.booking-hero__metrics span,
+	.booking-hero__summary {
+	  border: 1px solid rgba(255, 255, 255, 0.22);
+	  background: rgba(255, 255, 255, 0.12);
+	  backdrop-filter: blur(14px);
+	}
+
+	.booking-hero__metrics span {
+	  min-width: 138px;
+	  padding: 14px 16px;
+	  border-radius: 18px;
+	  color: rgba(255, 255, 255, 0.8);
+	  font-weight: 800;
+	}
+
+	.booking-hero__metrics strong {
+	  display: block;
+	  color: #ffffff;
+	  font-family: "Space Grotesk", sans-serif;
+	  font-size: 1.6rem;
+	}
+
+	.booking-hero__summary {
+	  flex-direction: column;
+	  justify-content: end;
+	  margin: 22px;
+	  border-radius: 24px;
+	}
+
+	.booking-hero__summary h4 {
+	  margin: 0;
+	  color: #ffffff;
+	  font-family: "Space Grotesk", sans-serif;
+	  font-size: 1.65rem;
+	}
+
+	.booking-layout {
+	  grid-template-columns: minmax(0, 1fr) minmax(300px, 0.34fr);
+	  align-items: start;
+	}
+
+	.booking-wizard-panel,
+	.booking-sidebar-card,
+	.confirmation-hero,
+	.review-card {
+	  border-radius: 24px;
+	  padding: clamp(18px, 2.4vw, 26px);
+	}
+
+	.wizard-progress {
+	  display: grid;
+	  gap: 18px;
+	  margin-bottom: 22px;
+	}
+
+	.wizard-progress__meta {
+	  display: flex;
+	  justify-content: space-between;
+	  gap: 14px;
+	  color: var(--muted);
+	  font-weight: 800;
+	}
+
+	.wizard-progress__meta strong {
+	  color: var(--text);
+	}
+
+	.wizard-steps {
+	  display: grid;
+	  grid-template-columns: repeat(7, minmax(0, 1fr));
+	  gap: 8px;
+	}
+
+	.wizard-step {
+	  display: grid;
+	  place-items: center;
+	  gap: 7px;
+	  min-height: 82px;
+	  padding: 10px;
+	  border: 1px solid var(--line);
+	  border-radius: 16px;
+	  background: rgba(255, 255, 255, 0.42);
+	  color: var(--muted);
+	  font-size: 0.82rem;
+	  font-weight: 800;
+	}
+
+	body[data-theme="dark"] .wizard-step {
+	  background: rgba(255, 255, 255, 0.05);
+	}
+
+	.wizard-step.active,
+	.wizard-step.complete,
+	.premium-select-card.selected,
+	.department-card.selected,
+	.hospital-premium-card.selected,
+	.doctor-premium-card.selected,
+	.slot-choice.selected {
+	  border-color: var(--line-strong);
+	  background: linear-gradient(135deg, var(--accent-soft), var(--teal-soft));
+	  color: var(--text);
+	}
+
+	.wizard-stage {
+	  animation: panelIn 220ms ease;
+	}
+
+	.premium-card-grid,
+	.hospital-premium-grid,
+	.doctor-premium-grid,
+	.review-grid,
+	.schedule-grid,
+	.patient-form-grid {
+	  display: grid;
+	  gap: 16px;
+	}
+
+	.premium-card-grid {
+	  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+	}
+
+	.premium-select-card,
+	.department-card,
+	.wizard-skeleton {
+	  display: grid;
+	  gap: 12px;
+	  min-height: 190px;
+	  padding: 20px;
+	  border: 1px solid var(--line);
+	  border-radius: 20px;
+	  background: var(--panel-strong);
+	  color: var(--text);
+	  text-align: left;
+	  box-shadow: var(--shadow-soft);
+	}
+
+	.premium-select-card strong,
+	.department-card strong {
+	  font-family: "Space Grotesk", sans-serif;
+	  font-size: 1.35rem;
+	}
+
+	.premium-select-card span,
+	.department-card span,
+	.premium-select-card em,
+	.department-card em {
+	  color: var(--muted);
+	  font-style: normal;
+	  line-height: 1.45;
+	}
+
+	.premium-select-card__icon,
+	.success-ring {
+	  display: grid;
+	  place-items: center;
+	  width: 48px;
+	  height: 48px;
+	  border-radius: 16px;
+	  color: #ffffff;
+	  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+	}
+
+	.compact-search {
+	  min-width: min(360px, 100%);
+	}
+
+	.hospital-premium-card,
+	.doctor-premium-card {
+	  display: grid;
+	  grid-template-columns: 210px minmax(0, 1fr);
+	  overflow: hidden;
+	  border-radius: 22px;
+	}
+
+	.hospital-premium-card img,
+	.doctor-premium-card img {
+	  width: 100%;
+	  height: 100%;
+	  min-height: 230px;
+	  object-fit: cover;
+	}
+
+	.hospital-premium-card__body,
+	.doctor-premium-card__content {
+	  display: grid;
+	  gap: 14px;
+	  padding: 20px;
+	}
+
+	.rating-pill {
+	  display: inline-flex;
+	  align-items: center;
+	  gap: 7px;
+	  min-height: 36px;
+	  padding: 8px 12px;
+	  border-radius: 999px;
+	  background: rgba(245, 158, 11, 0.16);
+	  color: #b45309;
+	  font-weight: 900;
+	}
+
+	.hospital-specialties,
+	.doctor-next-slot {
+	  margin: 0;
+	  padding: 13px 14px;
+	  border-radius: 16px;
+	  background: var(--accent-soft);
+	  color: var(--muted);
+	  line-height: 1.5;
+	}
+
+	.doctor-next-slot {
+	  display: flex;
+	  justify-content: space-between;
+	  gap: 12px;
+	  flex-wrap: wrap;
+	}
+
+	.doctor-next-slot strong {
+	  color: var(--text);
+	}
+
+	.chip-success {
+	  background: rgba(20, 184, 166, 0.16);
+	}
+
+	.popular-strip {
+	  display: flex;
+	  flex-wrap: wrap;
+	  gap: 10px;
+	}
+
+	.schedule-grid {
+	  grid-template-columns: minmax(180px, 0.32fr) minmax(0, 1fr);
+	  align-items: start;
+	}
+
+	.calendar-strip {
+	  display: grid;
+	  gap: 10px;
+	}
+
+	.calendar-day,
+	.slot-choice {
+	  border: 1px solid var(--line);
+	  border-radius: 16px;
+	  background: var(--panel-strong);
+	  color: var(--text);
+	  box-shadow: var(--shadow-soft);
+	}
+
+	.calendar-day {
+	  display: grid;
+	  gap: 4px;
+	  min-height: 86px;
+	  padding: 12px;
+	  text-align: center;
+	}
+
+	.calendar-day strong {
+	  font-family: "Space Grotesk", sans-serif;
+	  font-size: 1.5rem;
+	}
+
+	.calendar-day span,
+	.calendar-day em,
+	.slot-choice strong {
+	  color: var(--muted);
+	  font-style: normal;
+	  font-weight: 800;
+	}
+
+	.calendar-day.selected {
+	  border-color: var(--line-strong);
+	  background: var(--accent-soft);
+	}
+
+	.slot-panel {
+	  display: grid;
+	  gap: 18px;
+	}
+
+	.recommended-slot {
+	  padding: 18px;
+	  border-radius: 18px;
+	}
+
+	.recommended-slot h3,
+	.slot-group h4 {
+	  margin: 0;
+	  font-family: "Space Grotesk", sans-serif;
+	}
+
+	.slot-grid {
+	  display: grid;
+	  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+	  gap: 10px;
+	  margin-top: 10px;
+	}
+
+	.slot-choice {
+	  display: grid;
+	  gap: 8px;
+	  min-height: 76px;
+	  padding: 12px;
+	  text-align: left;
+	}
+
+	.slot-choice.recommended {
+	  border-color: rgba(20, 184, 166, 0.42);
+	}
+
+	.patient-form-grid {
+	  grid-template-columns: repeat(2, minmax(0, 1fr));
+	}
+
+	.patient-form-grid label {
+	  display: grid;
+	  gap: 8px;
+	  color: var(--muted);
+	  font-weight: 800;
+	}
+
+	.patient-form-grid label.full,
+	.patient-form-grid .segmented-control,
+	.patient-form-grid .form-feedback {
+	  grid-column: 1 / -1;
+	}
+
+	.patient-form-grid input,
+	.patient-form-grid select,
+	.patient-form-grid textarea {
+	  width: 100%;
+	  min-height: 52px;
+	  padding: 14px 16px;
+	  border: 1px solid var(--line);
+	  border-radius: 16px;
+	  outline: none;
+	  background: rgba(255, 255, 255, 0.72);
+	  color: var(--text);
+	}
+
+	body[data-theme="dark"] .patient-form-grid input,
+	body[data-theme="dark"] .patient-form-grid select,
+	body[data-theme="dark"] .patient-form-grid textarea {
+	  background: rgba(255, 255, 255, 0.06);
+	}
+
+	.segmented-control {
+	  display: inline-flex;
+	  gap: 8px;
+	  padding: 6px;
+	  border: 1px solid var(--line);
+	  border-radius: 18px;
+	  background: var(--panel-strong);
+	}
+
+	.segmented-control button {
+	  flex: 1 1 160px;
+	  min-height: 44px;
+	  border: 0;
+	  border-radius: 14px;
+	  background: transparent;
+	  color: var(--muted);
+	  font-weight: 900;
+	}
+
+	.segmented-control button.active {
+	  background: var(--accent-soft);
+	  color: var(--accent);
+	}
+
+	.wizard-actions {
+	  display: flex;
+	  justify-content: flex-end;
+	  flex-wrap: wrap;
+	  gap: 12px;
+	  margin-top: 18px;
+	}
+
+	.review-card__header,
+	.confirmation-hero {
+	  display: flex;
+	  align-items: center;
+	  justify-content: space-between;
+	  gap: 18px;
+	  flex-wrap: wrap;
+	}
+
+	.review-grid {
+	  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+	  margin-top: 20px;
+	}
+
+	.review-item {
+	  display: grid;
+	  gap: 8px;
+	  padding: 16px;
+	  border: 1px solid var(--line);
+	  border-radius: 16px;
+	  background: var(--panel-strong);
+	}
+
+	.review-item span {
+	  display: inline-flex;
+	  gap: 8px;
+	  color: var(--muted);
+	  font-weight: 800;
+	}
+
+	.review-item strong {
+	  overflow-wrap: anywhere;
+	}
+
+	.booking-sidebar {
+	  position: sticky;
+	  top: 120px;
+	}
+
+	.booking-sidebar-card h3 {
+	  margin: 0;
+	  font-family: "Space Grotesk", sans-serif;
+	}
+
+	.sidebar-timeline button {
+	  display: flex;
+	  align-items: center;
+	  gap: 10px;
+	  min-height: 44px;
+	  border: 1px solid var(--line);
+	  border-radius: 14px;
+	  background: transparent;
+	  color: var(--muted);
+	  font-weight: 800;
+	}
+
+	.sidebar-timeline button.active {
+	  color: var(--accent);
+	  background: var(--accent-soft);
+	}
+
+	.warning-strip {
+	  display: flex;
+	  align-items: center;
+	  gap: 12px;
+	  padding: 14px 16px;
+	  border-color: rgba(245, 158, 11, 0.28);
+	  border-radius: 16px;
+	  color: #b45309;
+	  background: rgba(245, 158, 11, 0.12);
+	  font-weight: 800;
+	}
+
+	.confirmation-hero {
+	  border-radius: 28px;
+	  background:
+	    linear-gradient(135deg, rgba(20, 184, 166, 0.14), rgba(37, 99, 235, 0.12)),
+	    var(--panel);
+	}
+
+	.success-animation {
+	  display: grid;
+	  place-items: center;
+	  width: 78px;
+	  height: 78px;
+	  border-radius: 50%;
+	  color: #ffffff;
+	  background: linear-gradient(135deg, var(--accent-2), var(--accent));
+	  box-shadow: 0 18px 38px rgba(20, 184, 166, 0.28);
+	  animation: successPop 520ms ease;
+	  font-size: 2rem;
+	}
+
+	.qr-placeholder {
+	  position: relative;
+	  display: grid;
+	  place-items: center;
+	  width: 132px;
+	  height: 132px;
+	  border: 1px solid var(--line);
+	  border-radius: 20px;
+	  background:
+	    linear-gradient(90deg, transparent 44%, var(--text) 45% 55%, transparent 56%),
+	    linear-gradient(0deg, transparent 44%, var(--text) 45% 55%, transparent 56%),
+	    var(--panel-solid);
+	  opacity: 0.86;
+	}
+
+	.qr-placeholder span {
+	  position: absolute;
+	  width: 28px;
+	  height: 28px;
+	  border: 6px solid var(--text);
+	}
+
+	.qr-placeholder span:nth-child(1) { top: 14px; left: 14px; }
+	.qr-placeholder span:nth-child(2) { top: 14px; right: 14px; }
+	.qr-placeholder span:nth-child(3) { bottom: 14px; left: 14px; }
+	.qr-placeholder span:nth-child(4) { bottom: 14px; right: 14px; }
+
+	.qr-placeholder strong {
+	  position: relative;
+	  padding: 6px 8px;
+	  border-radius: 8px;
+	  background: var(--panel-solid);
+	  color: var(--text);
+	}
+
+	.wizard-skeleton {
+	  overflow: hidden;
+	}
+
+	.wizard-skeleton span,
+	.wizard-skeleton strong,
+	.wizard-skeleton em {
+	  display: block;
+	  border-radius: 999px;
+	  background: linear-gradient(90deg, var(--accent-soft), rgba(255, 255, 255, 0.38), var(--accent-soft));
+	  background-size: 220% 100%;
+	  animation: skeletonPulse 1200ms ease-in-out infinite;
+	}
+
+	.wizard-skeleton span {
+	  width: 52px;
+	  height: 52px;
+	}
+
+	.wizard-skeleton strong {
+	  width: 70%;
+	  height: 22px;
+	}
+
+	.wizard-skeleton em {
+	  width: 88%;
+	  height: 16px;
+	}
+
+	@keyframes panelIn {
+	  from {
+	    opacity: 0;
+	    transform: translateY(8px);
+	  }
+	  to {
+	    opacity: 1;
+	    transform: translateY(0);
+	  }
+	}
+
+	@keyframes successPop {
+	  0% {
+	    transform: scale(0.72);
+	    opacity: 0;
+	  }
+	  70% {
+	    transform: scale(1.08);
+	  }
+	  100% {
+	    transform: scale(1);
+	    opacity: 1;
+	  }
+	}
+
+	@keyframes skeletonPulse {
+	  to {
+	    background-position: -220% 0;
+	  }
+	}
+
+	@keyframes spin {
+	  to {
+	    transform: rotate(360deg);
+	  }
 }
 
 @media (max-width: 1180px) {
@@ -1160,12 +1811,23 @@ body.is-login {
     flex: 1 1 100%;
   }
 
-  .admin-grid,
-  .detail-hero,
-  .hero,
-  .login-stage {
-    grid-template-columns: minmax(0, 1fr);
-  }
+	  .admin-grid,
+	  .detail-hero,
+	  .hero,
+	  .login-stage,
+	  .booking-hero,
+	  .booking-layout,
+	  .schedule-grid {
+	    grid-template-columns: minmax(0, 1fr);
+	  }
+
+	  .booking-sidebar {
+	    position: static;
+	  }
+
+	  .wizard-steps {
+	    grid-template-columns: repeat(4, minmax(0, 1fr));
+	  }
 
   .login-panel,
   .login-card {
@@ -1342,13 +2004,45 @@ body.is-login {
     align-items: flex-start;
   }
 
-  .cards-grid,
-  .history-grid,
-  .stat-grid,
-  .queue-grid,
-  .detail-grid {
-    grid-template-columns: 1fr;
-  }
+	  .cards-grid,
+	  .history-grid,
+	  .stat-grid,
+	  .queue-grid,
+	  .detail-grid,
+	  .premium-card-grid,
+	  .review-grid,
+	  .patient-form-grid,
+	  .hospital-premium-card,
+	  .doctor-premium-card {
+	    grid-template-columns: 1fr;
+	  }
+
+	  .wizard-steps {
+	    grid-template-columns: repeat(2, minmax(0, 1fr));
+	  }
+
+	  .wizard-step {
+	    min-height: 64px;
+	  }
+
+	  .hospital-premium-card img,
+	  .doctor-premium-card img {
+	    min-height: 210px;
+	  }
+
+	  .patient-form-grid label.full,
+	  .patient-form-grid .segmented-control,
+	  .patient-form-grid .form-feedback {
+	    grid-column: auto;
+	  }
+
+	  .booking-hero {
+	    min-height: auto;
+	  }
+
+	  .booking-hero__summary {
+	    margin: 0 18px 18px;
+	  }
 
   .form-grid {
     grid-template-columns: 1fr;
