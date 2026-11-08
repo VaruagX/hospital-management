@@ -17,7 +17,7 @@ async function getCities(req, res, next) {
     const result = await pool.query(
       `SELECT c.id, c.name, COUNT(h.id)::int AS hospital_count
        FROM cities c
-       LEFT JOIN hospitals h ON h.city_id = c.id
+       LEFT JOIN hospitals h ON h.city_id = c.id AND h.is_active
        GROUP BY c.id
        ORDER BY c.name`
     );
@@ -38,8 +38,8 @@ async function getHospitalsByCity(req, res, next) {
        FROM hospitals h
        JOIN cities c ON c.id = h.city_id
        LEFT JOIN favorite_hospitals fh ON fh.hospital_id = h.id AND fh.user_id = $2
-       LEFT JOIN doctors d ON d.hospital_id = h.id
-       WHERE h.city_id = $1
+       LEFT JOIN doctors d ON d.hospital_id = h.id AND d.is_active
+       WHERE h.city_id = $1 AND h.is_active
        GROUP BY h.id, c.name, fh.user_id
        ORDER BY h.name`,
       [cityId, req.user.id]
@@ -74,7 +74,7 @@ async function getDoctorsByHospital(req, res, next) {
            AND COALESCE(status, 'booked') <> 'cancelled'
          GROUP BY doctor_id
        ) today ON today.doctor_id = d.id
-       WHERE d.hospital_id = $1
+       WHERE d.hospital_id = $1 AND d.is_active AND h.is_active
        ORDER BY d.name`,
       [hospitalId, req.user.id]
     );
@@ -95,7 +95,7 @@ async function getDoctorDirectory(req, res, next) {
       search,
     } = req.query;
 
-    const filters = [];
+    const filters = ["d.is_active", "h.is_active"];
     const values = [];
     let index = 1;
 
@@ -175,8 +175,8 @@ async function getHospitalDetails(req, res, next) {
          FROM hospitals h
          JOIN cities c ON c.id = h.city_id
          LEFT JOIN favorite_hospitals fh ON fh.hospital_id = h.id AND fh.user_id = $2
-         LEFT JOIN doctors d ON d.hospital_id = h.id
-         WHERE h.id = $1
+         LEFT JOIN doctors d ON d.hospital_id = h.id AND d.is_active
+         WHERE h.id = $1 AND h.is_active
          GROUP BY h.id, c.name, fh.user_id
          LIMIT 1`,
         [hospitalId, req.user.id]
@@ -204,7 +204,7 @@ async function getHospitalDetails(req, res, next) {
              AND COALESCE(status, 'booked') <> 'cancelled'
            GROUP BY doctor_id
          ) today ON today.doctor_id = d.id
-         WHERE d.hospital_id = $1
+         WHERE d.hospital_id = $1 AND d.is_active AND h.is_active
          ORDER BY d.name`,
         [hospitalId, req.user.id]
       ),
@@ -260,7 +260,7 @@ async function getDoctorDetails(req, res, next) {
          FROM appointments
          GROUP BY doctor_id
        ) stats ON stats.doctor_id = d.id
-       WHERE d.id = $1
+       WHERE d.id = $1 AND d.is_active AND h.is_active
        LIMIT 1`,
       [doctorId, req.user.id]
     );

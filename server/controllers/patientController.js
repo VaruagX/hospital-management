@@ -28,6 +28,8 @@ async function getDoctorSlots(req, res, next) {
               unavailable_days, availability_note, max_patients_per_day
        FROM doctors
        WHERE id = $1
+         AND is_active
+         AND hospital_id IN (SELECT id FROM hospitals WHERE is_active)
        LIMIT 1`,
       [doctorId]
     );

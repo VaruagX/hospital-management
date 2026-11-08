@@ -437,7 +437,7 @@ async function getDoctorBookingMeta(client, doctorId, hospitalId) {
             h.name AS hospital_name
      FROM doctors d
      JOIN hospitals h ON h.id = d.hospital_id
-     WHERE d.id = $1 AND h.id = $2`,
+     WHERE d.id = $1 AND h.id = $2 AND d.is_active AND h.is_active`,
     [doctorId, hospitalId]
   );
 

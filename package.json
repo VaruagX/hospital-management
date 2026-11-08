@@ -4,7 +4,10 @@
   "description": "",
   "main": "server/server.js",
   "scripts": {
-    "start": "node server/server.js"
+    "start": "node server/server.js",
+    "migrate": "node db/migrate.js up",
+    "migrate:status": "node db/migrate.js status",
+    "test": "node --test --test-concurrency=1 \"test/*.test.js\""
   },
   "keywords": [],
   "author": "",
