@@ -1,4 +1,8 @@
-const { Pool } = require("pg");
+const { Pool, types } = require("pg");
+
+// Return DATE columns as plain "YYYY-MM-DD" strings. The default parser builds a JS Date at local midnight,
+// which serialises to the previous day in timezones ahead of UTC (e.g. a date of birth shifting by a day).
+types.setTypeParser(1082, (value) => value);
 
 const isTest = process.env.NODE_ENV === "test";
 const connectionString = isTest ? process.env.TEST_DATABASE_URL : process.env.DATABASE_URL;

@@ -42,6 +42,8 @@ const {
   reactivateStaff,
   listAuditLogs,
 } = require("../controllers/staffController");
+const { staffGetPatient, staffListPatients } = require("../controllers/patientRecordsController");
+const { staffListPayments, staffRefund } = require("../controllers/paymentController");
 const { requireRoles } = require("../middleware/auth");
 
 const router = express.Router();
@@ -92,6 +94,12 @@ router.get("/admin/board-data", queueStaff, getTodayBoard);
 router.get("/doctor/:id/today-data", queueStaff, getDoctorToday);
 router.post("/admin/appointment/:id/status", queueStaff, updateAppointmentStatus);
 router.post("/admin/appointment/:id/visit-notes", clinicians, updateAppointmentNotes);
+
+// Patients (scoped to the staff member's doctor/hospital) and payments
+router.get("/admin/patients", queueStaff, staffListPatients);
+router.get("/admin/patients/:id", queueStaff, staffGetPatient);
+router.get("/admin/payments", hospitalManagers, staffListPayments);
+router.post("/admin/payments/:id/refund", hospitalManagers, staffRefund);
 
 // Staff accounts + audit trail: admin only
 router.get("/admin/staff", adminOnly, listStaff);

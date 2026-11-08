@@ -741,7 +741,7 @@ async function getTodayBoard(req, res, next) {
        LEFT JOIN departments dep ON dep.id = d.department_id
        LEFT JOIN appointments a
          ON a.doctor_id = d.id
-        AND a.appointment_date = CURRENT_DATE
+        AND a.appointment_date = CURRENT_DATE AND a.status IS DISTINCT FROM 'pending_payment'
        WHERE ${scopeClauses.join(" AND ")}
        ORDER BY d.name,
                 CASE WHEN COALESCE(a.priority, 'normal') = 'emergency' THEN 0 ELSE 1 END,
@@ -829,7 +829,7 @@ async function getDoctorToday(req, res, next) {
        LEFT JOIN departments dep ON dep.id = d.department_id
        LEFT JOIN appointments a
          ON a.doctor_id = d.id
-        AND a.appointment_date = CURRENT_DATE
+        AND a.appointment_date = CURRENT_DATE AND a.status IS DISTINCT FROM 'pending_payment'
        WHERE d.id = $1
        ORDER BY CASE WHEN COALESCE(a.priority, 'normal') = 'emergency' THEN 0 ELSE 1 END,
                 a.token_number`,

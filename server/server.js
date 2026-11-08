@@ -6,6 +6,7 @@ const path = require("path");
 const cors = require("cors");
 const passport = require("./auth");
 const pool = require("./config/db");
+const { releaseExpiredHolds } = require("./services/booking");
 const apiRoutes = require("./routes/apiRoutes");
 const authRoutes = require("./routes/authRoutes");
 const adminRoutes = require("./routes/adminRoutes");
@@ -31,7 +32,14 @@ app.use(
     credentials: true,
   })
 );
-app.use(express.json());
+// Keep the exact bytes of the payment webhook body: its signature is computed over the raw payload.
+app.use(
+  express.json({
+    verify: (req, res, buf) => {
+      if (req.originalUrl === "/payments/webhook") req.rawBody = buf;
+    },
+  })
+);
 app.use(express.urlencoded({ extended: true }));
 app.use(
   session({
@@ -73,6 +81,10 @@ app.use((req, res) => {
 
 app.use((error, req, res, next) => {
   console.error(error);
+  if (error.code === "23505") {
+    // A unique constraint (slot, token, patient identity) stopped a concurrent duplicate.
+    return res.status(409).json({ error: "That slot or record was just taken by another request. Please retry." });
+  }
   const status = error.statusCode || 500;
   // Deliberate 4xx errors carry safe, user-facing messages; hide only unexpected 5xx details.
   res.status(status).json({
@@ -95,6 +107,11 @@ async function startServer() {
   app.listen(PORT, () => {
     console.log(`Server running on ${BASE_URL}`);
   });
+
+  // Release unpaid slot holds that ran out (also done lazily on every booking/slot read).
+  setInterval(() => {
+    releaseExpiredHolds(pool).catch((error) => console.error("Hold sweep failed", error.message));
+  }, 60 * 1000).unref();
 
   startReminderScheduler();
 }

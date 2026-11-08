@@ -36,7 +36,7 @@ async function resetDb() {
 /** Express app using the real routers/middleware, but a header-driven stand-in for Passport login. */
 function buildApp() {
   const app = express();
-  app.use(express.json());
+  app.use(express.json({ verify: (req, res, buf) => { if (req.originalUrl === "/payments/webhook") req.rawBody = buf; } }));
   app.use(async (req, res, next) => {
     const id = Number(req.get("x-test-user"));
     req.user = null;
@@ -53,6 +53,7 @@ function buildApp() {
   app.use(require("../server/routes/apiRoutes"));
   app.use(require("../server/routes/adminRoutes"));
   app.use((error, req, res, _next) => {
+    if (error.code === "23505") return res.status(409).json({ error: "duplicate" });
     res.status(error.statusCode || 500).json({ error: error.message });
   });
   return app;
@@ -63,19 +64,21 @@ async function startApp(app = buildApp()) {
     const s = app.listen(0, () => resolve(s));
   });
   const base = `http://127.0.0.1:${server.address().port}`;
-  async function call(method, url, { as, body } = {}) {
+  async function call(method, url, { as, body, headers = {}, raw } = {}) {
     const res = await fetch(base + url, {
       method,
       headers: {
         "content-type": "application/json",
         ...(as ? { "x-test-user": String(as) } : {}),
+        ...headers,
       },
-      body: body && method !== "GET" ? JSON.stringify(body) : undefined,
+      body: raw ?? (body && method !== "GET" ? JSON.stringify(body) : undefined),
     });
-    const text = await res.text();
+    const buf = Buffer.from(await res.arrayBuffer());
+    const text = buf.toString("utf8");
     let json = null;
-    try { json = JSON.parse(text); } catch { /* csv etc. */ }
-    return { status: res.status, json, text };
+    try { json = JSON.parse(text); } catch { /* csv, html, pdf */ }
+    return { status: res.status, json, text, buf, headers: res.headers };
   }
   return { base, call, close: () => new Promise((r) => server.close(r)) };
 }
@@ -140,4 +143,29 @@ function dateOffset(days) {
   return d.toISOString().slice(0, 10);
 }
 
-module.exports = { pool, resetDb, startApp, buildApp, seedWorld, migrate, dateOffset };
+const crypto = require("node:crypto");
+const gateway = require("../server/services/razorpay");
+const KEYS = { id: "rzp_test_key", secret: "test_key_secret", webhook: "test_webhook_secret" };
+
+/** Configure env credentials + a stub for the two network calls. Signature checks stay real. */
+function useGateway({ configured = true } = {}) {
+  process.env.RAZORPAY_KEY_ID = configured ? KEYS.id : "";
+  process.env.RAZORPAY_KEY_SECRET = configured ? KEYS.secret : "";
+  process.env.RAZORPAY_WEBHOOK_SECRET = configured ? KEYS.webhook : "";
+  const log = { orders: [], refunds: [], refundFails: false };
+  let n = 0;
+  gateway.setClient({
+    createOrder: async (args) => { log.orders.push(args); return { id: `order_${++n}` }; },
+    refund: async (args) => {
+      if (log.refundFails) throw new Error("gateway down");
+      log.refunds.push(args);
+      return { id: `rfnd_${++n}`, status: "processed" };
+    },
+  });
+  return log;
+}
+const signCheckout = (orderId, paymentId, secret = KEYS.secret) =>
+  crypto.createHmac("sha256", secret).update(`${orderId}|${paymentId}`).digest("hex");
+const signWebhook = (raw, secret = KEYS.webhook) => crypto.createHmac("sha256", secret).update(raw).digest("hex");
+
+module.exports = { KEYS, useGateway, signCheckout, signWebhook, pool, resetDb, startApp, buildApp, seedWorld, migrate, dateOffset };

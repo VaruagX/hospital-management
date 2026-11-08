@@ -3,6 +3,7 @@ const {
   buildDoctorSlots,
   normalizeTime,
 } = require("../utils/slots");
+const { assertBookableDate, releaseExpiredHolds, slotTimeProblem } = require("../services/booking");
 
 const DAY_NAMES = [
   "sunday",
@@ -22,14 +23,17 @@ async function getDoctorSlots(req, res, next) {
     if (!date) {
       return res.status(400).json({ error: "Date is required" });
     }
+    assertBookableDate(date);
+    await releaseExpiredHolds(pool);
 
     const doctorResult = await pool.query(
-      `SELECT id, name, available_from, available_to, slot_step_minutes, slot_duration_minutes,
-              unavailable_days, availability_note, max_patients_per_day
-       FROM doctors
-       WHERE id = $1
-         AND is_active
-         AND hospital_id IN (SELECT id FROM hospitals WHERE is_active)
+      `SELECT d.id, d.name, d.available_from, d.available_to, d.slot_step_minutes, d.slot_duration_minutes,
+              d.unavailable_days, d.availability_note, d.max_patients_per_day, d.consultation_fee,
+              h.opens_at, h.closes_at
+       FROM doctors d
+       JOIN hospitals h ON h.id = d.hospital_id AND h.is_active
+       JOIN cities c ON c.id = h.city_id AND c.is_active
+       WHERE d.id = $1 AND d.is_active
        LIMIT 1`,
       [doctorId]
     );
@@ -79,11 +83,6 @@ async function getDoctorSlots(req, res, next) {
       (row) => String(row.status || "").toLowerCase() !== "cancelled"
     );
     const bookedSlots = new Set(activeRows.map((row) => Number(row.slot_number)));
-    const nextTokenNumber =
-      bookedSlotsResult.rows.reduce(
-        (maxToken, row) => Math.max(maxToken, Number(row.token_number) || 0),
-        0
-      ) + 1;
     const limitReached =
       Number(doctor.max_patients_per_day || 0) > 0 &&
       activeRows.length >= Number(doctor.max_patients_per_day);
@@ -98,12 +97,11 @@ async function getDoctorSlots(req, res, next) {
       endTime: normalizeTime(slot.endTime),
       label: `${normalizeTime(slot.startTime)} to ${normalizeTime(slot.endTime)}`,
       isBooked: bookedSlots.has(slot.slotNumber),
-    }));
-    const nextSlot = unavailable
-      ? null
-      : limitReached
-        ? null
-        : slots.find((slot) => slot.slotNumber === nextTokenNumber) || null;
+      unavailableReason: bookedSlots.has(slot.slotNumber)
+        ? "Already booked"
+        : slotTimeProblem(doctor, slot, date),
+    })).map((slot) => ({ ...slot, isAvailable: !unavailable && !limitReached && !slot.unavailableReason }));
+    const nextSlot = slots.find((slot) => slot.isAvailable) || null;
 
     return res.json({
       doctorId: Number(doctorId),
@@ -112,6 +110,7 @@ async function getDoctorSlots(req, res, next) {
       limitReached,
       bookedPatients: activeRows.length,
       maxPatientsPerDay: Number(doctor.max_patients_per_day || 0),
+      consultationFee: Number(doctor.consultation_fee || 0),
       nextSlot,
       note: unavailable
         ? leave?.reason ||

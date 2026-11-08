@@ -1,7 +1,9 @@
 const pool = require("../config/db");
-const {
-  buildDoctorSlots,
-} = require("../utils/slots");
+const gateway = require("../services/razorpay");
+const { assertBookableDate, chooseSlot, HOLD_MINUTES, releaseExpiredHolds } = require("../services/booking");
+const { resolvePatient } = require("../services/patients");
+const { isRefundEligible, refundPayment } = require("../services/payments");
+const { audit } = require("../services/audit");
 const PRIORITY_RANK_SQL = `CASE WHEN COALESCE(priority, 'normal') = 'emergency' THEN 0 ELSE 1 END`;
 
 const DAY_NAMES = [
@@ -53,6 +55,7 @@ async function createAppointment(req, res, next) {
       family_member_id: familyMemberId,
       reason_for_visit: reasonForVisit,
       priority,
+      slot_number: requestedSlot,
     } = req.body;
     const normalizedPriority = normalizePriority(priority);
     const trimmedReasonForVisit = String(reasonForVisit || "").trim();
@@ -65,15 +68,26 @@ async function createAppointment(req, res, next) {
       return res.status(400).json({ error: "Reason for visit is required" });
     }
 
+    assertBookableDate(date);
+
     await client.query("BEGIN");
     await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [
       `${doctorId}:${date}`,
     ]);
+    await releaseExpiredHolds(client);
 
     const doctor = await getDoctorBookingMeta(client, doctorId, hospitalId);
     if (!doctor) {
       await client.query("ROLLBACK");
       return res.status(404).json({ error: "Doctor or hospital not found" });
+    }
+
+    // Paid consultations are held (not confirmed) until the gateway verifies payment.
+    const fee = Number(doctor.consultation_fee) || 0;
+    const needsPayment = fee > 0;
+    if (needsPayment && !gateway.isConfigured()) {
+      await client.query("ROLLBACK");
+      return res.status(503).json({ error: "Online payment is not available right now. Please try again later." });
     }
 
     const dayBlockMessage = getDoctorBlockedMessage(doctor, date);
@@ -100,11 +114,7 @@ async function createAppointment(req, res, next) {
     }
 
     const nextTokenNumber = await getNextTokenNumber(client, doctorId, date);
-    const selectedSlot = findSelectableSlot(doctor, nextTokenNumber);
-    if (!selectedSlot) {
-      await client.query("ROLLBACK");
-      return res.status(409).json({ error: "No free slots are left for this doctor on the selected date." });
-    }
+    const selectedSlot = await chooseSlot(client, doctor, date, requestedSlot);
 
     const familyMember = familyMemberId
       ? await getFamilyMember(client, familyMemberId, req.user.id)
@@ -114,11 +124,28 @@ async function createAppointment(req, res, next) {
       return res.status(404).json({ error: "Family member not found" });
     }
 
-    const bookingName = familyMember?.name || name;
+    const ownedPatient = req.body.patient_id
+      ? (
+          await client.query(
+            "SELECT id, full_name, phone FROM patients WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL",
+            [Number(req.body.patient_id) || 0, req.user.id]
+          )
+        ).rows[0]
+      : null;
+    if (req.body.patient_id && !ownedPatient) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ error: "Patient record not found" });
+    }
+
+    const bookingName = familyMember?.name || ownedPatient?.full_name || name;
     if (!bookingName || !String(bookingName).trim()) {
       await client.query("ROLLBACK");
       return res.status(400).json({ error: "Patient name is required" });
     }
+
+    const patientId = ownedPatient
+      ? ownedPatient.id
+      : await resolveBookingPatient(client, req, { name: bookingName.trim(), mobile, familyMember });
 
     const patientsBeforeResult = await client.query(
       `SELECT COUNT(*)::int AS patients_before
@@ -148,9 +175,13 @@ async function createAppointment(req, res, next) {
          family_member_id,
          reason_for_visit,
          priority,
-         status
+         status,
+         patient_id,
+         fee_amount,
+         hold_expires_at
        )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
+               CASE WHEN $14 = 'pending_payment' THEN NOW() + make_interval(mins => $17::int) END)
        RETURNING id,
                  TO_CHAR(appointment_date, 'YYYY-MM-DD') AS appointment_date,
                  token_number,
@@ -162,7 +193,10 @@ async function createAppointment(req, res, next) {
                  family_member_id,
                  reason_for_visit,
                  COALESCE(priority, 'normal') AS priority,
-                 status`,
+                 status,
+                 patient_id,
+                 fee_amount,
+                 hold_expires_at`,
       [
         req.user.id,
         bookingName.trim(),
@@ -171,13 +205,16 @@ async function createAppointment(req, res, next) {
         hospitalId,
         date,
         nextTokenNumber,
-        nextTokenNumber,
+        selectedSlot.slotNumber,
         selectedSlot.startTime,
         selectedSlot.endTime,
         familyMember?.id || null,
         trimmedReasonForVisit,
         normalizedPriority,
-        "booked",
+        needsPayment ? "pending_payment" : "booked",
+        patientId,
+        needsPayment ? fee : null,
+        HOLD_MINUTES,
       ]
     );
 
@@ -190,13 +227,15 @@ async function createAppointment(req, res, next) {
 
     const appointment = appointmentResult.rows[0];
 
-    await createNotification(client, {
-      userId: req.user.id,
-      appointmentId: appointment.id,
-      type: "booking_created",
-      title: "Booking created",
-      message: `Appointment with Dr. ${doctor.name} at ${doctor.hospital_name} was booked for ${formatNotificationDate(date)}.`,
-    });
+    if (!needsPayment) {
+      await createNotification(client, {
+        userId: req.user.id,
+        appointmentId: appointment.id,
+        type: "booking_created",
+        title: "Booking created",
+        message: `Appointment with Dr. ${doctor.name} at ${doctor.hospital_name} was booked for ${formatNotificationDate(date)}.`,
+      });
+    }
 
     await client.query("COMMIT");
 
@@ -206,6 +245,7 @@ async function createAppointment(req, res, next) {
       hospital_name: doctor.hospital_name,
       family_member_name: familyMember?.name || null,
       family_relation: familyMember?.relation || null,
+      requires_payment: needsPayment,
       patients_before: patientsBeforeResult.rows[0]?.patients_before || 0,
     });
   } catch (error) {
@@ -224,7 +264,7 @@ async function cancelAppointment(req, res, next) {
     await client.query("BEGIN");
     const result = await client.query(
       `UPDATE appointments a
-       SET status = 'cancelled'
+       SET status = 'cancelled', cancel_reason = 'patient_cancelled', cancelled_at = NOW(), hold_expires_at = NULL
        FROM doctors d, hospitals h
        WHERE a.id = $1
          AND a.user_id = $2
@@ -234,7 +274,8 @@ async function cancelAppointment(req, res, next) {
        RETURNING a.id,
                  d.name AS doctor_name,
                  h.name AS hospital_name,
-                 TO_CHAR(a.appointment_date, 'YYYY-MM-DD') AS appointment_date`,
+                 TO_CHAR(a.appointment_date, 'YYYY-MM-DD') AS appointment_date,
+                 TO_CHAR(a.slot_start, 'HH24:MI') AS slot_start`,
       [appointmentId, req.user.id]
     );
 
@@ -252,7 +293,25 @@ async function cancelAppointment(req, res, next) {
     });
 
     await client.query("COMMIT");
-    return res.json({ success: true });
+
+    // Refund policy: a verified payment is refunded in full when cancelled early enough.
+    const cancelled = result.rows[0];
+    const paid = (
+      await pool.query(
+        "SELECT id FROM appointment_payments WHERE appointment_id = $1 AND status = 'paid'",
+        [cancelled.id]
+      )
+    ).rows[0];
+    let refund = null;
+    if (paid) {
+      if (isRefundEligible(cancelled.appointment_date, cancelled.slot_start)) {
+        refund = await refundPayment(paid.id, { reason: "patient_cancelled", actor: req.user });
+      } else {
+        refund = { status: "not_eligible" };
+      }
+      await audit(req, "appointment.cancel_paid", "appointment", cancelled.id, { refund: refund.status });
+    }
+    return res.json({ success: true, refund: refund && { status: refund.status, amount: refund.amount ?? null } });
   } catch (error) {
     await client.query("ROLLBACK");
     return next(error);
@@ -266,11 +325,12 @@ async function rescheduleAppointment(req, res, next) {
 
   try {
     const { appointmentId } = req.params;
-    const { date } = req.body;
+    const { date, slot_number: requestedSlot } = req.body;
 
     if (!date) {
       return res.status(400).json({ error: "New appointment date is required" });
     }
+    assertBookableDate(date);
 
     await client.query("BEGIN");
     const appointmentLookup = await client.query(
@@ -283,7 +343,7 @@ async function rescheduleAppointment(req, res, next) {
     );
 
     const appointment = appointmentLookup.rows[0];
-    if (!appointment || ["completed", "cancelled"].includes((appointment.status || "").toLowerCase())) {
+    if (!appointment || ["completed", "cancelled", "pending_payment"].includes((appointment.status || "").toLowerCase())) {
       await client.query("ROLLBACK");
       return res.status(404).json({ error: "Appointment cannot be rescheduled" });
     }
@@ -331,17 +391,13 @@ async function rescheduleAppointment(req, res, next) {
       date,
       appointment.id
     );
-    const selectedSlot = findSelectableSlot(doctor, nextTokenNumber);
-    if (!selectedSlot) {
-      await client.query("ROLLBACK");
-      return res.status(409).json({ error: "No free slots are left for this doctor on the selected date." });
-    }
+    const selectedSlot = await chooseSlot(client, doctor, date, requestedSlot, appointment.id);
 
     const updated = await client.query(
       `UPDATE appointments
        SET appointment_date = $1,
            token_number = $2,
-           slot_number = $2,
+           slot_number = $6,
            slot_start = $3,
            slot_end = $4,
            checked_in_at = NULL,
@@ -355,6 +411,7 @@ async function rescheduleAppointment(req, res, next) {
         selectedSlot.startTime,
         selectedSlot.endTime,
         appointment.id,
+        selectedSlot.slotNumber,
       ]
     );
 
@@ -427,6 +484,9 @@ async function getDoctorBookingMeta(client, doctorId, hospitalId) {
             d.specialization,
             d.department_id,
             d.max_patients_per_day,
+            d.consultation_fee,
+            h.opens_at,
+            h.closes_at,
             d.available_from,
             d.available_to,
             d.slot_step_minutes,
@@ -482,17 +542,6 @@ async function getDoctorLeaveMessage(client, doctorId, date) {
 
 function getDateDayIndex(value) {
   return new Date(`${value}T12:00:00`).getDay();
-}
-
-function findSelectableSlot(doctor, slotNumber) {
-  const slots = buildDoctorSlots({
-    availableFrom: doctor.available_from,
-    availableTo: doctor.available_to,
-    slotStepMinutes: doctor.slot_step_minutes,
-    slotDurationMinutes: doctor.slot_duration_minutes,
-  });
-
-  return slots.find((slot) => slot.slotNumber === Number(slotNumber)) || null;
 }
 
 async function getActiveAppointmentCount(client, doctorId, date, excludeAppointmentId = null) {
@@ -558,6 +607,23 @@ async function getNextTokenNumber(client, doctorId, date, excludeAppointmentId =
   );
 
   return Number(result.rows[0]?.next_token || 1);
+}
+
+/** Link the booking to a patient record: an owned patient_id, or find/create one for this person. */
+async function resolveBookingPatient(client, req, { name, mobile, familyMember }) {
+  const { patient } = await resolvePatient(
+    client,
+    req.user.id,
+    {
+      name,
+      phone: mobile,
+      date_of_birth: familyMember ? null : req.body.date_of_birth,
+      gender: req.body.gender,
+      email: req.body.email || (familyMember ? null : req.user.email),
+    },
+    { relation: familyMember?.relation || "self", familyMemberId: familyMember?.id || null }
+  );
+  return patient.id;
 }
 
 async function getFamilyMember(client, familyMemberId, userId) {

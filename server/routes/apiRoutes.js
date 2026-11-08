@@ -28,6 +28,11 @@ const {
   getFamilyMembers,
   addFamilyMember,
 } = require("../controllers/patientController");
+const {
+  createPatient, getMyPatient, listMyPatients, myPatientHistory, updateMyPatient,
+} = require("../controllers/patientRecordsController");
+const { createOrder, myPayments, verifyPayment, webhook } = require("../controllers/paymentController");
+const { getReceipt, pdfReceipt, printReceipt } = require("../controllers/receiptController");
 const { requireAuth } = require("../middleware/auth");
 
 const router = express.Router();
@@ -55,5 +60,21 @@ router.post("/favorites/doctors/:doctorId", requireAuth, toggleFavoriteDoctor);
 router.post("/favorites/hospitals/:hospitalId", requireAuth, toggleFavoriteHospital);
 router.get("/family-members", requireAuth, getFamilyMembers);
 router.post("/family-members", requireAuth, addFamilyMember);
+
+// Patient records (owner only)
+router.get("/patients", requireAuth, listMyPatients);
+router.post("/patients", requireAuth, createPatient);
+router.get("/patients/:id", requireAuth, getMyPatient);
+router.post("/patients/:id", requireAuth, updateMyPatient);
+router.get("/patients/:id/appointments", requireAuth, myPatientHistory);
+
+// Payments + receipts. The webhook is authenticated by its HMAC signature, not a session.
+router.post("/payments/order", requireAuth, createOrder);
+router.post("/payments/verify", requireAuth, verifyPayment);
+router.get("/payments/my", requireAuth, myPayments);
+router.post("/payments/webhook", webhook);
+router.get("/receipts/:appointmentId", requireAuth, getReceipt);
+router.get("/receipts/:appointmentId/print", requireAuth, printReceipt);
+router.get("/receipts/:appointmentId/pdf", requireAuth, pdfReceipt);
 
 module.exports = router;
