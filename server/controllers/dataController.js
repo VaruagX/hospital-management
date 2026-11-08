@@ -18,6 +18,7 @@ async function getCities(req, res, next) {
       `SELECT c.id, c.name, COUNT(h.id)::int AS hospital_count
        FROM cities c
        LEFT JOIN hospitals h ON h.city_id = c.id AND h.is_active
+       WHERE c.is_active
        GROUP BY c.id
        ORDER BY c.name`
     );
@@ -31,15 +32,15 @@ async function getHospitalsByCity(req, res, next) {
   try {
     const { cityId } = req.params;
     const result = await pool.query(
-      `SELECT h.id, h.name, h.location, h.image, h.city_id, h.contact_phone, h.map_link,
+      `SELECT h.id, h.name, h.location, h.image, h.city_id, h.contact_phone, h.map_link, h.address, h.description, h.logo, h.email, h.opens_at, h.closes_at,
               c.name AS city_name,
               CASE WHEN fh.user_id IS NULL THEN FALSE ELSE TRUE END AS is_favorite,
               COUNT(d.id)::int AS doctor_count
        FROM hospitals h
-       JOIN cities c ON c.id = h.city_id
+       JOIN cities c ON c.id = h.city_id AND c.is_active
        LEFT JOIN favorite_hospitals fh ON fh.hospital_id = h.id AND fh.user_id = $2
        LEFT JOIN doctors d ON d.hospital_id = h.id AND d.is_active
-       WHERE h.city_id = $1 AND h.is_active
+       WHERE h.city_id = $1 AND h.is_active AND c.is_active
        GROUP BY h.id, c.name, fh.user_id
        ORDER BY h.name`,
       [cityId, req.user.id]
@@ -58,9 +59,9 @@ async function getDoctorsByHospital(req, res, next) {
               d.slot_step_minutes, d.slot_duration_minutes,
               d.unavailable_days, d.availability_note,
               d.department_id, dep.name AS department_name,
-              d.max_patients_per_day,
+              d.max_patients_per_day, d.qualification, d.experience_years, d.consultation_fee,
               d.hospital_id, h.name AS hospital_name, h.location AS hospital_location,
-              h.contact_phone AS hospital_contact_phone, h.map_link AS hospital_map_link,
+              h.contact_phone AS hospital_contact_phone, h.map_link AS hospital_map_link, h.logo AS hospital_logo, h.address AS hospital_address,
               CASE WHEN fd.user_id IS NULL THEN FALSE ELSE TRUE END AS is_favorite,
               COALESCE(today.today_bookings, 0)::int AS booked_patients
        FROM doctors d
@@ -135,15 +136,15 @@ async function getDoctorDirectory(req, res, next) {
               d.slot_step_minutes, d.slot_duration_minutes,
               d.unavailable_days, d.availability_note,
               d.department_id, dep.name AS department_name,
-              d.max_patients_per_day,
+              d.max_patients_per_day, d.qualification, d.experience_years, d.consultation_fee,
               d.hospital_id, h.name AS hospital_name, h.location AS hospital_location,
-              h.contact_phone AS hospital_contact_phone, h.map_link AS hospital_map_link,
+              h.contact_phone AS hospital_contact_phone, h.map_link AS hospital_map_link, h.logo AS hospital_logo, h.address AS hospital_address,
               CASE WHEN fd.user_id IS NULL THEN FALSE ELSE TRUE END AS is_favorite,
               h.city_id, c.name AS city_name,
               COALESCE(today.today_bookings, 0)::int AS booked_patients
        FROM doctors d
        JOIN hospitals h ON h.id = d.hospital_id
-       JOIN cities c ON c.id = h.city_id
+       JOIN cities c ON c.id = h.city_id AND c.is_active
        LEFT JOIN departments dep ON dep.id = d.department_id
        LEFT JOIN favorite_doctors fd ON fd.doctor_id = d.id AND fd.user_id = $${index++}
        LEFT JOIN (
@@ -168,12 +169,12 @@ async function getHospitalDetails(req, res, next) {
     const { hospitalId } = req.params;
     const [hospitalResult, doctorsResult] = await Promise.all([
       pool.query(
-        `SELECT h.id, h.name, h.location, h.image, h.city_id, h.contact_phone, h.map_link,
+        `SELECT h.id, h.name, h.location, h.image, h.city_id, h.contact_phone, h.map_link, h.address, h.description, h.logo, h.email, h.opens_at, h.closes_at,
                 c.name AS city_name,
                 CASE WHEN fh.user_id IS NULL THEN FALSE ELSE TRUE END AS is_favorite,
                 COUNT(d.id)::int AS doctor_count
          FROM hospitals h
-         JOIN cities c ON c.id = h.city_id
+         JOIN cities c ON c.id = h.city_id AND c.is_active
          LEFT JOIN favorite_hospitals fh ON fh.hospital_id = h.id AND fh.user_id = $2
          LEFT JOIN doctors d ON d.hospital_id = h.id AND d.is_active
          WHERE h.id = $1 AND h.is_active
@@ -186,15 +187,15 @@ async function getHospitalDetails(req, res, next) {
                 d.slot_step_minutes, d.slot_duration_minutes,
                 d.unavailable_days, d.availability_note,
                 d.department_id, dep.name AS department_name,
-                d.max_patients_per_day,
+                d.max_patients_per_day, d.qualification, d.experience_years, d.consultation_fee,
                 d.hospital_id, h.name AS hospital_name, h.location AS hospital_location,
-                h.contact_phone AS hospital_contact_phone, h.map_link AS hospital_map_link,
+                h.contact_phone AS hospital_contact_phone, h.map_link AS hospital_map_link, h.logo AS hospital_logo, h.address AS hospital_address,
                 c.name AS city_name,
                 CASE WHEN fd.user_id IS NULL THEN FALSE ELSE TRUE END AS is_favorite,
                 COALESCE(today.today_bookings, 0)::int AS booked_patients
          FROM doctors d
          JOIN hospitals h ON h.id = d.hospital_id
-         JOIN cities c ON c.id = h.city_id
+         JOIN cities c ON c.id = h.city_id AND c.is_active
          LEFT JOIN departments dep ON dep.id = d.department_id
          LEFT JOIN favorite_doctors fd ON fd.doctor_id = d.id AND fd.user_id = $2
          LEFT JOIN (
@@ -232,9 +233,9 @@ async function getDoctorDetails(req, res, next) {
               d.slot_step_minutes, d.slot_duration_minutes,
               d.unavailable_days, d.availability_note,
               d.department_id, dep.name AS department_name,
-              d.max_patients_per_day,
+              d.max_patients_per_day, d.qualification, d.experience_years, d.consultation_fee,
               d.hospital_id, h.name AS hospital_name, h.location AS hospital_location,
-              h.contact_phone AS hospital_contact_phone, h.map_link AS hospital_map_link,
+              h.contact_phone AS hospital_contact_phone, h.map_link AS hospital_map_link, h.logo AS hospital_logo, h.address AS hospital_address,
               h.city_id, c.name AS city_name,
               CASE WHEN fd.user_id IS NULL THEN FALSE ELSE TRUE END AS is_favorite,
               COALESCE(stats.today_bookings, 0)::int AS booked_patients,
@@ -244,7 +245,7 @@ async function getDoctorDetails(req, res, next) {
               COALESCE(stats.cancelled_bookings, 0)::int AS cancelled_bookings
        FROM doctors d
        JOIN hospitals h ON h.id = d.hospital_id
-       JOIN cities c ON c.id = h.city_id
+       JOIN cities c ON c.id = h.city_id AND c.is_active
        LEFT JOIN departments dep ON dep.id = d.department_id
        LEFT JOIN favorite_doctors fd ON fd.doctor_id = d.id AND fd.user_id = $2
        LEFT JOIN (
@@ -411,10 +412,10 @@ async function getAppointmentDetails(req, res, next) {
               a.visit_notes,
               d.id AS doctor_id, d.name AS doctor_name, d.specialization,
               d.department_id, dep.name AS department_name,
-              d.max_patients_per_day,
+              d.max_patients_per_day, d.qualification, d.experience_years, d.consultation_fee,
               d.available_from, d.available_to, d.slot_step_minutes, d.slot_duration_minutes,
               h.id AS hospital_id, h.name AS hospital_name, h.location AS hospital_location,
-              h.contact_phone AS hospital_contact_phone, h.map_link AS hospital_map_link,
+              h.contact_phone AS hospital_contact_phone, h.map_link AS hospital_map_link, h.logo AS hospital_logo, h.address AS hospital_address,
               fm.id AS family_member_id, fm.name AS family_member_name, fm.relation AS family_relation,
               (
                 SELECT COUNT(*)::int
@@ -465,10 +466,10 @@ async function getMyAppointments(req, res, next) {
               a.visit_notes,
               d.id AS doctor_id, d.name AS doctor_name, d.specialization,
               d.department_id, dep.name AS department_name,
-              d.max_patients_per_day,
+              d.max_patients_per_day, d.qualification, d.experience_years, d.consultation_fee,
               d.available_from, d.available_to, d.slot_step_minutes, d.slot_duration_minutes,
               h.id AS hospital_id, h.name AS hospital_name, h.location AS hospital_location,
-              h.contact_phone AS hospital_contact_phone, h.map_link AS hospital_map_link,
+              h.contact_phone AS hospital_contact_phone, h.map_link AS hospital_map_link, h.logo AS hospital_logo, h.address AS hospital_address,
               fm.id AS family_member_id, fm.name AS family_member_name, fm.relation AS family_relation
        FROM appointments a
        JOIN doctors d ON d.id = a.doctor_id

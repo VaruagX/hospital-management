@@ -11,8 +11,6 @@ const {
   updateAppointmentNotes,
   getTodayBoard,
   getDoctorToday,
-  addHospital,
-  updateHospital,
   addDoctor,
   updateDoctor,
   getDoctorLeaves,
@@ -24,6 +22,19 @@ const {
   reactivateHospital,
   reactivateDoctor,
 } = require("../controllers/adminController");
+const {
+  addDepartment,
+  addHospital,
+  deactivateCity,
+  getHospitalDepartments,
+  getMedia,
+  listCityStats,
+  reactivateCity,
+  setHospitalDepartments,
+  updateCity,
+  updateHospital,
+  uploadMedia,
+} = require("../controllers/catalogController");
 const {
   listStaff,
   upsertStaff,
@@ -47,7 +58,19 @@ router.get("/admin/cities", hospitalManagers, getAdminCities);
 router.post("/admin/add-city", adminOnly, addCity);
 router.get("/admin/hospitals", adminOnly, getAdminHospitals);
 router.post("/admin/add-hospital", adminOnly, addHospital);
-router.post("/admin/update-hospital/:id", adminOnly, updateHospital);
+router.post("/admin/update-hospital/:id", hospitalManagers, updateHospital); // hospital admins: own hospital only
+router.get("/admin/cities/stats", adminOnly, listCityStats);
+router.post("/admin/cities/:id", adminOnly, updateCity);
+router.post("/admin/cities/:id/deactivate", adminOnly, deactivateCity);
+router.post("/admin/cities/:id/reactivate", adminOnly, reactivateCity);
+router.post("/admin/departments", adminOnly, addDepartment);
+router.post("/admin/hospitals/:id/departments", hospitalManagers, setHospitalDepartments);
+router.post(
+  "/admin/media",
+  hospitalManagers,
+  express.raw({ type: ["image/png", "image/jpeg", "image/webp"], limit: "2mb" }),
+  uploadMedia
+);
 router.post("/admin/delete-hospital/:id", adminOnly, deleteHospital); // deactivates; nothing is deleted
 router.post("/admin/reactivate-hospital/:id", adminOnly, reactivateHospital);
 
@@ -76,5 +99,9 @@ router.post("/admin/staff", adminOnly, upsertStaff);
 router.post("/admin/staff/:id/deactivate", adminOnly, deactivateStaff);
 router.post("/admin/staff/:id/reactivate", adminOnly, reactivateStaff);
 router.get("/admin/audit-logs", adminOnly, listAuditLogs);
+
+// Public read endpoints used by every page that shows an uploaded image / hospital departments.
+router.get("/media/:id", getMedia);
+router.get("/hospital/:id/departments", getHospitalDepartments);
 
 module.exports = router;

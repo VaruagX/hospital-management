@@ -1,6 +1,7 @@
 const pool = require("../config/db");
 const { ACTIVE_QUEUE_STATUSES } = require("../utils/slots");
 const { audit } = require("../services/audit");
+const v = require("../utils/validate");
 const {
   scopeOf,
   applyAppointmentScope,
@@ -17,6 +18,27 @@ function badRequest(message) {
   const error = new Error(message);
   error.statusCode = 400;
   return error;
+}
+
+// Validated optional/extended doctor fields shared by create and update.
+function doctorExtras(body) {
+  const availableFrom = v.time(body.available_from, "Available from");
+  const availableTo = v.time(body.available_to, "Available to");
+  if (availableFrom && availableTo && availableFrom >= availableTo) {
+    throw badRequest("Available-to time must be after available-from time");
+  }
+  const slotStep = v.intRange(body.slot_step_minutes, "Slot step", 5, 240) ?? 15;
+  const slotDuration = v.intRange(body.slot_duration_minutes, "Consultation duration", 5, 240) ?? 15;
+  return {
+    availableFrom,
+    availableTo,
+    slotStep,
+    slotDuration,
+    image: v.imageRef(body.image, "Doctor photo"),
+    qualification: v.text(body.qualification, "Qualification", { max: 300 }),
+    experienceYears: v.intRange(body.experience_years, "Experience", 0, 80),
+    fee: v.money(body.consultation_fee, "Consultation fee"),
+  };
 }
 
 // Clinical notes are visible to the treating doctor and global admins only.
@@ -109,7 +131,7 @@ async function fetchAdminAppointments(filters = {}, user = null) {
             d.id AS doctor_id,
             d.name AS doctor_name,
             d.specialization,
-            d.max_patients_per_day,
+            d.max_patients_per_day, d.qualification, d.experience_years, d.consultation_fee,
             dep.id AS department_id,
             dep.name AS department_name,
             h.id AS hospital_id,
@@ -242,7 +264,7 @@ async function addCity(req, res, next) {
 async function getAdminHospitals(req, res, next) {
   try {
     const result = await pool.query(
-      `SELECT h.id, h.name, h.location, h.image, h.city_id, h.contact_phone, h.map_link,
+      `SELECT h.id, h.name, h.location, h.image, h.city_id, h.contact_phone, h.map_link, h.address, h.description, h.logo, h.email, h.opens_at, h.closes_at,
               h.is_active,
               c.name AS city_name,
               COUNT(d.id) FILTER (WHERE d.is_active)::int AS doctor_count
@@ -258,79 +280,6 @@ async function getAdminHospitals(req, res, next) {
   }
 }
 
-async function addHospital(req, res, next) {
-  try {
-    const {
-      name,
-      city_id: cityId,
-      location,
-      image,
-      contact_phone: contactPhone,
-      map_link: mapLink,
-    } = req.body;
-
-    if (!name || !cityId || !location) {
-      return res.status(400).json({ error: "Name, city, and location are required" });
-    }
-
-    const result = await pool.query(
-      `INSERT INTO hospitals (name, city_id, location, image, contact_phone, map_link)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       RETURNING *`,
-      [name.trim(), cityId, location.trim(), image || null, contactPhone || "", mapLink || ""]
-    );
-    await audit(req, "hospital.create", "hospital", result.rows[0].id, { name: name.trim() });
-
-    return res.status(201).json(result.rows[0]);
-  } catch (error) {
-    return next(error);
-  }
-}
-
-async function updateHospital(req, res, next) {
-  try {
-    const id = parseId(req.params.id);
-    const {
-      name,
-      city_id: cityId,
-      location,
-      image,
-      contact_phone: contactPhone,
-      map_link: mapLink,
-    } = req.body;
-
-    if (!id) {
-      return res.status(400).json({ error: "Invalid hospital id" });
-    }
-
-    if (!name || !cityId || !location) {
-      return res.status(400).json({ error: "Name, city, and location are required" });
-    }
-
-    const result = await pool.query(
-      `UPDATE hospitals
-       SET name = $1,
-           city_id = $2,
-           location = $3,
-           image = $4,
-           contact_phone = $5,
-           map_link = $6
-       WHERE id = $7
-       RETURNING *`,
-      [name.trim(), cityId, location.trim(), image || null, contactPhone || "", mapLink || "", id]
-    );
-
-    if (!result.rows[0]) {
-      return res.status(404).json({ error: "Hospital not found" });
-    }
-
-    await audit(req, "hospital.update", "hospital", id, { name: name.trim() });
-    return res.json(result.rows[0]);
-  } catch (error) {
-    return next(error);
-  }
-}
-
 async function getAdminDoctors(req, res, next) {
   try {
     const scope = scopeOf(req.user);
@@ -342,7 +291,7 @@ async function getAdminDoctors(req, res, next) {
               d.slot_step_minutes, d.slot_duration_minutes,
               d.unavailable_days, d.availability_note,
               d.department_id, dep.name AS department_name,
-              d.max_patients_per_day,
+              d.max_patients_per_day, d.qualification, d.experience_years, d.consultation_fee,
               d.hospital_id, h.name AS hospital_name, h.location AS hospital_location,
               c.name AS city_name
        FROM doctors d
@@ -366,18 +315,13 @@ async function addDoctor(req, res, next) {
       specialization,
       department_id: departmentId,
       hospital_id: hospitalId,
-      available_from: availableFrom,
-      available_to: availableTo,
-      slot_step_minutes: slotStepMinutes,
-      slot_duration_minutes: slotDurationMinutes,
       unavailable_days: unavailableDays,
       availability_note: availabilityNote,
       max_patients_per_day: maxPatientsPerDay,
-      image,
     } = req.body;
     const normalizedMaxPatients = parsePositiveInt(maxPatientsPerDay, 24);
 
-    if (!name || !specialization || !departmentId || !hospitalId || !availableFrom || !availableTo) {
+    if (!name || !specialization || !departmentId || !hospitalId || !req.body.available_from || !req.body.available_to) {
       return res.status(400).json({ error: "All doctor fields are required" });
     }
 
@@ -389,26 +333,38 @@ async function addDoctor(req, res, next) {
       return res.status(403).json({ error: "You can only add doctors to your own hospital" });
     }
 
+    const extras = doctorExtras(req.body);
+    const hospital = (
+      await pool.query("SELECT id FROM hospitals WHERE id = $1 AND is_active", [hospitalId])
+    ).rows[0];
+    if (!hospital) {
+      return res.status(404).json({ error: "Hospital not found or inactive" });
+    }
+
     const result = await pool.query(
       `INSERT INTO doctors (
          name, specialization, department_id, hospital_id, image, available_from, available_to,
-         slot_step_minutes, slot_duration_minutes, unavailable_days, availability_note, max_patients_per_day
+         slot_step_minutes, slot_duration_minutes, unavailable_days, availability_note, max_patients_per_day,
+         qualification, experience_years, consultation_fee
        )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, COALESCE($15, 0))
        RETURNING *`,
       [
         name,
         specialization,
         departmentId,
         hospitalId,
-        image || null,
-        availableFrom,
-        availableTo,
-        Number(slotStepMinutes) || 15,
-        Number(slotDurationMinutes) || 15,
+        extras.image,
+        extras.availableFrom,
+        extras.availableTo,
+        extras.slotStep,
+        extras.slotDuration,
         unavailableDays || "",
         availabilityNote || "",
         normalizedMaxPatients,
+        extras.qualification,
+        extras.experienceYears,
+        extras.fee,
       ]
     );
     await audit(req, "doctor.create", "doctor", result.rows[0].id, { name, hospitalId });
@@ -427,18 +383,13 @@ async function updateDoctor(req, res, next) {
       specialization,
       department_id: departmentId,
       hospital_id: hospitalId,
-      available_from: availableFrom,
-      available_to: availableTo,
-      slot_step_minutes: slotStepMinutes,
-      slot_duration_minutes: slotDurationMinutes,
       unavailable_days: unavailableDays,
       availability_note: availabilityNote,
       max_patients_per_day: maxPatientsPerDay,
-      image,
     } = req.body;
     const normalizedMaxPatients = parsePositiveInt(maxPatientsPerDay, 24);
 
-    if (!name || !specialization || !departmentId || !hospitalId || !availableFrom || !availableTo) {
+    if (!name || !specialization || !departmentId || !hospitalId || !req.body.available_from || !req.body.available_to) {
       return res.status(400).json({ error: "All doctor fields are required" });
     }
 
@@ -462,6 +413,7 @@ async function updateDoctor(req, res, next) {
       return res.status(404).json({ error: "Doctor not found" });
     }
 
+    const extras = doctorExtras(req.body);
     const result = await pool.query(
       `UPDATE doctors
        SET name = $1,
@@ -475,23 +427,29 @@ async function updateDoctor(req, res, next) {
            slot_duration_minutes = $9,
            unavailable_days = $10,
            availability_note = $11,
-           max_patients_per_day = $12
-       WHERE id = $13
+           max_patients_per_day = $12,
+           qualification = $13,
+           experience_years = $14,
+           consultation_fee = COALESCE($15, consultation_fee)
+       WHERE id = $16
        RETURNING *`,
       [
         name,
         specialization,
         departmentId,
         hospitalId,
-        image || null,
-        availableFrom,
-        availableTo,
-        Number(slotStepMinutes) || 15,
-        Number(slotDurationMinutes) || 15,
+        extras.image,
+        extras.availableFrom,
+        extras.availableTo,
+        extras.slotStep,
+        extras.slotDuration,
         unavailableDays || "",
         availabilityNote || "",
         normalizedMaxPatients,
-        id,
+        extras.qualification,
+        extras.experienceYears,
+        extras.fee,
+        targetId,
       ]
     );
 
@@ -499,7 +457,11 @@ async function updateDoctor(req, res, next) {
       return res.status(404).json({ error: "Doctor not found" });
     }
 
-    await audit(req, "doctor.update", "doctor", targetId, { name, hospitalId });
+    await audit(req, "doctor.update", "doctor", targetId, {
+      name,
+      hospitalId,
+      fee: extras.fee,
+    });
     return res.json(result.rows[0]);
   } catch (error) {
     return next(error);
@@ -1016,7 +978,6 @@ module.exports = {
   addCity,
   addDoctor,
   addDoctorLeave,
-  addHospital,
   deleteDoctor,
   deleteDoctorLeave,
   deleteHospital,
@@ -1035,5 +996,4 @@ module.exports = {
   updateAppointmentNotes,
   updateAppointmentStatus,
   updateDoctor,
-  updateHospital,
 };
