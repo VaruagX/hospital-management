@@ -53,7 +53,7 @@ const state = {
   selectedHospital: null,
   latestAppointment: null,
   route: "home",
-  theme: localStorage.getItem("pulsecare-theme") || "dark",
+  theme: localStorage.getItem("pulsecare-theme") || "light",
   editingDoctorId: null,
   editingHospitalId: null,
   mobileMenuOpen: false,
@@ -598,7 +598,10 @@ function updateHeader() {
     appointments: ["My bookings", "Upcoming and past appointments"],
     profile: ["My profile", "Personal details and history"],
     notifications: ["Notification center", "Booking updates"],
-    confirmation: ["Booking confirmed", "Track your token live"],
+    confirmation:
+      (state.latestAppointment?.status || "").toLowerCase() === "pending_payment"
+        ? ["Payment pending", "Complete payment to confirm"]
+        : ["Booking confirmed", "Track your token live"],
     admin: ["Admin control room", "Operations dashboard"],
     "admin-board": ["Reception board", "Today's appointment board"],
     "doctor-today": ["Doctor daily list", state.doctorDaily?.doctor_name || "Today's patients"],
@@ -790,15 +793,14 @@ function renderPremiumHospitalCard(hospital) {
             <p class="eyebrow">${escapeHtml(hospital.city_name || getWizardCity()?.name || "Hospital")}</p>
             <h3>${escapeHtml(hospital.name)}</h3>
           </div>
-          <span class="rating-pill"><i class="fa-solid fa-star"></i>${meta.rating}</span>
         </div>
-        <p class="card__meta"><i class="fa-solid fa-location-dot"></i>${escapeHtml(hospital.location || "Address not available")}</p>
+        <p class="card__meta"><i class="fa-solid fa-location-dot"></i>${escapeHtml(hospital.address || hospital.location || "Address not available")}</p>
+        ${hospital.contact_phone ? `<p class="card__meta"><i class="fa-solid fa-phone"></i>${escapeHtml(hospital.contact_phone)}</p>` : ""}
         <div class="chip-row">
           <span class="chip"><i class="fa-solid fa-user-doctor"></i>${hospital.doctor_count || 0} doctors</span>
-          <span class="chip"><i class="fa-solid fa-road"></i>${meta.distance}</span>
-          <span class="chip"><i class="fa-solid fa-calendar-check"></i>${hospital.doctor_count ? "Available today" : "Availability pending"}</span>
+          ${meta.hours ? `<span class="chip"><i class="fa-regular fa-clock"></i>${escapeHtml(meta.hours)}</span>` : ""}
         </div>
-        <p class="hospital-specialties">${escapeHtml(meta.departments)}</p>
+        ${meta.departments ? `<p class="hospital-specialties">${escapeHtml(meta.departments)}</p>` : ""}
         <div class="card__actions">
           <button class="primary-button" data-action="wizard-select-hospital" data-hospital-id="${hospital.id}" type="button">
             <i class="fa-solid fa-arrow-right"></i>
@@ -892,12 +894,10 @@ function renderPremiumDoctorCard(doctor) {
             <p class="eyebrow">${escapeHtml(doctor.department_name || doctor.specialization || "Specialist")}</p>
             <h3>${escapeHtml(doctor.name)}</h3>
           </div>
-          <span class="rating-pill"><i class="fa-solid fa-star"></i>${meta.rating} (${meta.reviews})</span>
         </div>
-        <p>${escapeHtml(meta.qualification)} - ${meta.experience} years experience</p>
+        <p>${[meta.qualification, meta.experience !== null ? `${meta.experience} years experience` : ""].filter(Boolean).map(escapeHtml).join(" - ") || "&nbsp;"}</p>
         <div class="chip-row">
-          <span class="chip"><i class="fa-solid fa-language"></i>${escapeHtml(meta.languages)}</span>
-          <span class="chip"><i class="fa-solid fa-indian-rupee-sign"></i>${meta.fee}</span>
+          <span class="chip"><i class="fa-solid fa-indian-rupee-sign"></i>${escapeHtml(meta.feeLabel)}</span>
           <span class="chip"><i class="fa-solid fa-hospital"></i>${escapeHtml(doctor.hospital_name || getWizardHospital()?.name || "")}</span>
           <span class="chip ${availableToday ? "chip-success" : ""}"><i class="fa-solid fa-calendar-check"></i>${availableToday ? "Available today" : "Unavailable today"}</span>
         </div>
@@ -930,7 +930,7 @@ function renderWizardScheduleStep() {
         <div>
           <p class="eyebrow">Step 5</p>
           <h3>Select date and time</h3>
-          <p>Unavailable dates and full slots are disabled. The hospital queue engine confirms the earliest available token.</p>
+          <p>Pick any open time. Booked, past and out-of-hours times are disabled. For paid consultations your time is held for a few minutes while you pay.</p>
         </div>
       </div>
       <div class="schedule-grid">
@@ -973,9 +973,9 @@ function renderWizardSlotGroups(slotResponse) {
   const groupedSlots = groupSlotsByDaypart(slotResponse.slots || []);
   return `
     <div class="recommended-slot">
-      <p class="eyebrow">Recommended earliest slot</p>
-      <h3>${slotResponse.nextSlot ? `Token ${slotResponse.nextSlot.slotNumber} - ${slotResponse.nextSlot.label}` : "No slots available"}</h3>
-      <p>${slotResponse.bookedPatients || 0}/${slotResponse.maxPatientsPerDay || "--"} bookings confirmed for this doctor.</p>
+      <p class="eyebrow">Earliest available time</p>
+      <h3>${slotResponse.nextSlot ? escapeHtml(formatTime(slotResponse.nextSlot.startTime)) : "No slots available"}</h3>
+      <p>${slotResponse.bookedPatients || 0}/${slotResponse.maxPatientsPerDay || "--"} bookings taken for this doctor. Consultation fee ${escapeHtml(formatFee(slotResponse.consultationFee))}.</p>
     </div>
     ${Object.entries(groupedSlots).map(([label, slots]) => `
       <div class="slot-group">
@@ -983,7 +983,7 @@ function renderWizardSlotGroups(slotResponse) {
         <div class="slot-grid">
           ${slots.map((slot) => {
             const isRecommended = slotResponse.nextSlot && Number(slot.slotNumber) === Number(slotResponse.nextSlot.slotNumber);
-            const disabled = slot.isBooked || !isRecommended;
+            const disabled = !slot.isAvailable;
             return `
               <button
                 class="slot-choice ${selectedSlot?.slotNumber === slot.slotNumber ? "selected" : ""} ${isRecommended ? "recommended" : ""}"
@@ -993,8 +993,8 @@ function renderWizardSlotGroups(slotResponse) {
                 ${disabled ? "disabled" : ""}
                 aria-pressed="${selectedSlot?.slotNumber === slot.slotNumber}"
               >
-                <span>${escapeHtml(slot.label)}</span>
-                <strong>${slot.isBooked ? "Booked" : isRecommended ? "Recommended" : "Queue managed"}</strong>
+                <span>${escapeHtml(formatTime(slot.startTime))}</span>
+                <strong>${slot.isAvailable ? (isRecommended ? "Earliest" : "Available") : escapeHtml(slot.unavailableReason || "Unavailable")}</strong>
               </button>
             `;
           }).join("")}
@@ -1095,7 +1095,7 @@ function renderWizardReviewStep() {
         <button class="ghost-button" data-action="wizard-back" type="button"><i class="fa-solid fa-arrow-left"></i><span>Back</span></button>
         <button class="primary-button" data-action="wizard-confirm-booking" type="button" ${validationError ? "disabled" : ""}>
           <i class="fa-solid fa-calendar-check"></i>
-          <span>Confirm Appointment</span>
+          <span>${Number(getWizardDoctor()?.consultation_fee) > 0 ? `Confirm and pay ${escapeHtml(formatFee(getWizardDoctor().consultation_fee))}` : "Confirm Appointment"}</span>
         </button>
       </div>
     </div>
@@ -1123,8 +1123,8 @@ function renderWizardSidebar() {
         <h3>${escapeHtml(summary.slotLabel || "Earliest available slot appears here")}</h3>
         <p>${escapeHtml(summary.waitEstimate)}</p>
         <div class="chip-row">
-          <span class="chip"><i class="fa-solid fa-star"></i>Recommended doctors highlighted</span>
-          <span class="chip"><i class="fa-solid fa-envelope"></i>Email confirmation enabled</span>
+          <span class="chip"><i class="fa-solid fa-indian-rupee-sign"></i>${escapeHtml(summary.fee)}</span>
+          ${Number(getWizardDoctor()?.consultation_fee) > 0 ? '<span class="chip"><i class="fa-solid fa-hourglass-half"></i>Time is held while you pay</span>' : ""}
         </div>
       </article>
     </aside>
@@ -1718,8 +1718,9 @@ function appointmentHistoryCards(items, active) {
                 ${appointment.hospital_contact_phone ? `<span><i class="fa-solid fa-phone"></i> ${escapeHtml(appointment.hospital_contact_phone)}</span>` : ""}
                 ${appointment.hospital_map_link ? `<a href="${escapeAttribute(appointment.hospital_map_link)}" target="_blank" rel="noreferrer">Open map</a>` : ""}
               </div>
+              ${renderPaymentActions(appointment)}
               ${
-                active
+                active && (appointment.status || "").toLowerCase() !== "pending_payment"
                   ? `
                     <form class="form-card compact-form" data-form="reschedule-appointment">
                       <input type="hidden" name="appointment_id" value="${appointment.id}" />
@@ -1741,7 +1742,7 @@ function appointmentHistoryCards(items, active) {
                       </div>
                     </form>
                   `
-                  : `
+                  : (appointment.status || "").toLowerCase() === "pending_payment" ? "" : `
                     <div class="form-actions">
                       <button class="secondary-button" type="button" data-action="print-slip" data-appointment-id="${appointment.id}"><i class="fa-solid fa-print"></i><span>Print Slip</span></button>
                     </div>
@@ -1839,16 +1840,25 @@ async function renderConfirmation() {
   }
   const queue = await loadQueue().catch(() => null);
   const appointment = state.latestAppointment;
+  const isHeld = (appointment.status || "").toLowerCase() === "pending_payment";
   app.innerHTML = `
     <section class="page-grid confirmation-premium">
       <article class="confirmation-hero">
         <div class="success-animation" aria-hidden="true">
-          <i class="fa-solid fa-check"></i>
+          <i class="fa-solid ${isHeld ? "fa-hourglass-half" : "fa-check"}"></i>
         </div>
         <div>
-          <p class="eyebrow">Booking confirmed</p>
+          ${
+            (appointment.status || "").toLowerCase() === "pending_payment"
+              ? `<p class="eyebrow">Payment pending</p>
+          <h3>Complete payment to confirm your time</h3>
+          <p>Appointment ID PC-${String(appointment.id).padStart(6, "0")} is held${Number(appointment.hold_seconds_left) > 0 ? ` for about ${Math.ceil(appointment.hold_seconds_left / 60)} more minutes` : ", but the hold has expired"}.</p>
+          ${renderPaymentActions(appointment)}`
+              : `<p class="eyebrow">Booking confirmed</p>
           <h3>Your appointment is reserved</h3>
           <p>Appointment ID PC-${String(appointment.id).padStart(6, "0")} has been sent to ${escapeHtml(state.session.user.email || "your account")}.</p>
+          ${renderPaymentActions(appointment)}`
+          }
           <div class="form-actions">
             <button class="primary-button" type="button" data-action="print-current-slip"><i class="fa-solid fa-print"></i><span>Print Slip</span></button>
             <button class="secondary-button" type="button" data-action="download-current-slip"><i class="fa-solid fa-download"></i><span>Download Slip</span></button>
@@ -1869,7 +1879,7 @@ async function renderConfirmation() {
       </div>
       <article class="queue-card">
         <div class="section-header">
-          <div><p class="eyebrow">Booking confirmation</p><h3>Your token is reserved</h3><p>${appointment.patients_before} patients were ahead when you booked.${normalizePriority(appointment.priority) === "emergency" ? " Emergency priority moves you ahead of normal tokens in the live queue." : ""}</p></div>
+          <div><p class="eyebrow">${isHeld ? "Time held" : "Booking confirmation"}</p><h3>${isHeld ? "Your token is held until payment" : "Your token is reserved"}</h3><p>${appointment.patients_before} patients were ahead when you booked.${normalizePriority(appointment.priority) === "emergency" ? " Emergency priority moves you ahead of normal tokens in the live queue." : ""}</p></div>
           <div class="form-actions">
             <button class="ghost-button" type="button" data-action="refresh-queue"><i class="fa-solid fa-rotate"></i><span>Refresh Queue</span></button>
             <button class="secondary-button" type="button" data-action="print-current-slip"><i class="fa-solid fa-print"></i><span>Print Slip</span></button>
@@ -1891,9 +1901,9 @@ async function renderConfirmation() {
           </div>
           <div class="list-card"><p class="eyebrow">Token number</p><div class="queue-pill">${appointment.token_number}</div><div class="chip-row">${priorityBadge(appointment.priority)}${statusBadge(appointment.status)}</div></div>
           <div class="list-card">
-            <p class="eyebrow">Email confirmation</p>
-            <h3>Ready</h3>
-            <p>Reminder email will be sent automatically when SMTP is configured.</p>
+            <p class="eyebrow">Payment</p>
+            <h3>${escapeHtml(isHeld ? "Pending" : appointment.payment_status ? formatStatusLabel(appointment.payment_status) : Number(appointment.fee_amount) > 0 ? "Paid" : "No fee due")}</h3>
+            <p>${Number(appointment.fee_amount) > 0 ? `Consultation fee ${escapeHtml(formatFee(appointment.fee_amount))}${appointment.receipt_no ? ` - receipt ${escapeHtml(appointment.receipt_no)}` : ""}` : "This consultation is free of charge."}</p>
           </div>
         </div>
       </article>
@@ -1910,7 +1920,7 @@ async function renderConfirmation() {
       <article class="queue-card">
         <p class="eyebrow">Help & contact</p>
         <h3>Need directions or support?</h3>
-        <p class="card__meta"><i class="fa-solid fa-envelope"></i> Reminder emails will be sent to ${escapeHtml(state.session.user.email || "your Google account")} before the appointment.</p>
+        
         <div class="help-strip large">
           <span><i class="fa-solid fa-location-dot"></i> ${escapeHtml(appointment.hospital_location)}</span>
           ${appointment.hospital_contact_phone ? `<span><i class="fa-solid fa-phone"></i> ${escapeHtml(appointment.hospital_contact_phone)}</span>` : "<span><i class='fa-solid fa-circle-info'></i> Front desk contact will be updated soon.</span>"}
@@ -2580,6 +2590,7 @@ async function handleClick(event) {
   if (action === "wizard-select-slot") {
     const slotResponse = getWizardSlotResponse();
     const slot = slotResponse?.slots?.find((item) => String(item.slotNumber) === String(actionTarget.dataset.slotNumber));
+    if (!slot?.isAvailable) return;
     updateBookingDraft({
       selectedSlotNumber: actionTarget.dataset.slotNumber,
       expectedSlot: slot || slotResponse?.nextSlot || null,
@@ -2673,15 +2684,26 @@ async function handleClick(event) {
     printAppointmentSlip(allAppointments.find((item) => item.id === appointmentId));
   }
 
+  if (action === "pay-appointment") {
+    await payForAppointment(actionTarget.dataset.appointmentId);
+    return;
+  }
+
   if (action === "cancel-appointment") {
-    await apiFetch(`/appointment/${actionTarget.dataset.appointmentId}/cancel`, { method: "POST" });
+    const cancelResult = await apiFetch(`/appointment/${actionTarget.dataset.appointmentId}/cancel`, { method: "POST" });
     await loadMyAppointments();
     await loadNotifications();
     if (state.latestAppointment?.id === Number(actionTarget.dataset.appointmentId)) {
       await loadAppointmentDetails(actionTarget.dataset.appointmentId);
     }
     render();
-    showToast("Appointment cancelled");
+    const refund = cancelResult?.refund;
+    showToast(
+      refund?.status === "processed" ? `Appointment cancelled. Refund of ${formatFee(refund.amount)} initiated.`
+      : refund?.status === "pending" ? "Appointment cancelled. Your refund is being processed."
+      : refund?.status === "not_eligible" ? "Appointment cancelled. This was inside the no-refund window."
+      : "Appointment cancelled"
+    );
   }
 
   if (action === "delete-hospital") {
@@ -3313,26 +3335,29 @@ function getHospitalMeta(hospital) {
     .filter((doctor) => String(doctor.hospital_id) === String(hospital.id))
     .map((doctor) => doctor.department_name || doctor.specialization)
     .filter(Boolean);
+  const hours =
+    hospital.opens_at && hospital.closes_at
+      ? `${formatTime(hospital.opens_at)} - ${formatTime(hospital.closes_at)}`
+      : "";
   return {
-    rating: (4.4 + (hashNumber(hospital.name) % 5) / 10).toFixed(1),
-    distance: "Distance unavailable",
-    departments: departments.length
-      ? [...new Set(departments)].slice(0, 4).join(", ")
-      : "Multi-specialty OPD, diagnostics, emergency support",
+    hours,
+    departments: [...new Set(departments)].slice(0, 4).join(", "),
   };
 }
 
+function formatFee(value) {
+  const fee = Number(value);
+  if (!Number.isFinite(fee) || fee <= 0) return "Free consultation";
+  return `\u20B9${fee.toLocaleString("en-IN", { maximumFractionDigits: 2 })}`;
+}
+
 function getDoctorMeta(doctor) {
-  const seed = hashNumber(`${doctor.id}-${doctor.name}`);
-  const qualifications = ["MBBS, MD", "MBBS, MS", "MBBS, DNB", "MD, Fellowship"];
-  const languages = ["English, Hindi", "English, Hindi, Marathi", "English, Hindi, Kannada", "English, Hindi, Tamil"];
+  const years = Number(doctor.experience_years);
   return {
-    qualification: qualifications[seed % qualifications.length],
-    experience: 8 + (seed % 18),
-    languages: languages[seed % languages.length],
-    fee: 500 + (seed % 7) * 100,
-    rating: (4.3 + (seed % 7) / 10).toFixed(1),
-    reviews: 80 + (seed % 420),
+    qualification: doctor.qualification || "",
+    experience: Number.isFinite(years) && doctor.experience_years !== null ? years : null,
+    fee: Number(doctor.consultation_fee) || 0,
+    feeLabel: formatFee(doctor.consultation_fee),
     nextSlot: isDoctorUnavailableOnDate(doctor, todayDate())
       ? "Next available after weekly off"
       : `Today after ${formatTime(doctor.available_from || APPOINTMENT_SLOT_START_TIME)}`,
@@ -3354,7 +3379,7 @@ function getBookingSummary() {
     doctorName: doctor?.name || "",
     date: draft.date ? formatDate(draft.date) : "",
     slotLabel: slot?.label || draft.expectedSlot?.label || "",
-    fee: doctorMeta ? `Rs. ${doctorMeta.fee}` : "Shown after doctor selection",
+    fee: doctorMeta ? doctorMeta.feeLabel : "Shown after doctor selection",
     patientName,
     bookingFor: familyMember ? `${familyMember.name} (${familyMember.relation})` : "Self",
     notes: draft.notes,
@@ -3368,7 +3393,7 @@ function validateWizardStep(step) {
   if (step >= 2 && !draft.hospitalId) return "Select a hospital to continue.";
   if (step >= 3 && !draft.departmentId) return "Select a department to continue.";
   if (step >= 4 && !draft.doctorId) return "Select a doctor to continue.";
-  if (step >= 5 && (!draft.date || !getWizardSelectedSlot())) return "Select an available appointment date and recommended slot.";
+  if (step >= 5 && (!draft.date || !getWizardSelectedSlot())) return "Select an available date and time.";
   if (step >= 6) {
     const familyMember = getSelectedFamilyMember();
     const patientName = familyMember?.name || draft.patientName || state.session?.user?.name || "";
@@ -3385,8 +3410,14 @@ function validateWizardStep(step) {
 
 function updateWizardPatientFeedback() {
   const feedback = document.getElementById("bookingWizardPatientFeedback");
+  const error = validateWizardStep(6);
   if (feedback) {
-    feedback.textContent = validateWizardStep(6);
+    feedback.textContent = error;
+  }
+  // Keep the Continue button in step with the form: it used to stay disabled after the form became valid.
+  const next = document.querySelector('.wizard-screen [data-action="wizard-next"]');
+  if (next) {
+    next.disabled = Boolean(error);
   }
 }
 
@@ -3535,6 +3566,7 @@ async function confirmWizardBooking() {
     name: patientName,
     mobile,
     date: draft.date,
+    slot_number: getWizardSelectedSlot()?.slotNumber,
     priority: draft.priority,
     reason_for_visit: draft.reasonForVisit,
   };
@@ -3564,12 +3596,103 @@ async function confirmWizardBooking() {
     state.route = "confirmation";
     history.replaceState({}, "", `/?appointment=${booking.id}`);
     render();
-    showToast(`Appointment booked. Your token is ${booking.token_number}.`);
+    if (booking.requires_payment) {
+      showToast("Your time is held. Complete payment to confirm the appointment.");
+      setLoading(false);
+      await payForAppointment(booking.id);
+    } else {
+      showToast(`Appointment booked. Your token is ${booking.token_number}.`);
+    }
   } catch (error) {
     showToast(error.message || "Unable to confirm appointment. Please try again.", "error");
   } finally {
     setLoading(false);
   }
+}
+
+let razorpayScriptPromise = null;
+function loadRazorpayCheckout() {
+  if (window.Razorpay) return Promise.resolve();
+  if (!razorpayScriptPromise) {
+    razorpayScriptPromise = new Promise((resolve, reject) => {
+      const script = document.createElement("script");
+      script.src = "https://checkout.razorpay.com/v1/checkout.js";
+      script.onload = resolve;
+      script.onerror = () => {
+        razorpayScriptPromise = null;
+        reject(new Error("Could not load the payment window. Check your connection and try again."));
+      };
+      document.head.appendChild(script);
+    });
+  }
+  return razorpayScriptPromise;
+}
+
+/**
+ * Pay for a held appointment. The browser only reports what Razorpay returned; the server verifies the
+ * signature and is the only thing that can confirm the booking.
+ */
+async function payForAppointment(appointmentId) {
+  try {
+    const order = await apiFetch("/payments/order", {
+      method: "POST",
+      body: JSON.stringify({ appointment_id: Number(appointmentId) }),
+    });
+    await loadRazorpayCheckout();
+    const user = state.session?.user || {};
+    const paid = await new Promise((resolve, reject) => {
+      const checkout = new window.Razorpay({
+        key: order.key_id,
+        order_id: order.order_id,
+        amount: order.amount_paise,
+        currency: order.currency,
+        name: "PulseCare HMS",
+        description: "Consultation fee",
+        prefill: { name: user.name || "", email: user.email || "", contact: user.phone || "" },
+        theme: { color: "#0e7490" },
+        handler: (response) => {
+          apiFetch("/payments/verify", { method: "POST", body: JSON.stringify(response) })
+            .then(() => resolve(true))
+            .catch(reject);
+        },
+        modal: { ondismiss: () => resolve(false) },
+      });
+      checkout.on("payment.failed", (failure) => {
+        showToast(failure?.error?.description || "Payment failed. You can try again.", "error");
+      });
+      checkout.open();
+    });
+    await loadAppointmentDetails(appointmentId);
+    await loadMyAppointments();
+    await loadNotifications();
+    render();
+    showToast(paid ? "Payment verified. Your appointment is confirmed." : "Payment not completed. Your time is still held for a few minutes.", paid ? undefined : "error");
+  } catch (error) {
+    await loadMyAppointments().catch(() => {});
+    render();
+    showToast(error.message || "Payment could not be started.", "error");
+  }
+}
+
+function renderPaymentActions(appointment) {
+  const status = (appointment.status || "").toLowerCase();
+  if (status === "pending_payment") {
+    const minutes = Math.ceil(Number(appointment.hold_seconds_left || 0) / 60);
+    return `
+      <p class="card__meta"><i class="fa-solid fa-hourglass-half"></i> ${minutes > 0 ? `Time held for about ${minutes} more min` : "Hold has expired"} - pay ${escapeHtml(formatFee(appointment.fee_amount))} to confirm</p>
+      <div class="form-actions">
+        ${minutes > 0 ? `<button class="primary-button" type="button" data-action="pay-appointment" data-appointment-id="${appointment.id}"><i class="fa-solid fa-credit-card"></i><span>Pay ${escapeHtml(formatFee(appointment.fee_amount))}</span></button>` : ""}
+        <button class="danger-button" type="button" data-action="cancel-appointment" data-appointment-id="${appointment.id}"><i class="fa-solid fa-ban"></i><span>Cancel</span></button>
+      </div>`;
+  }
+  if (appointment.receipt_no) {
+    return `
+      <div class="form-actions">
+        <a class="secondary-button link-button" href="/receipts/${appointment.id}/print" target="_blank" rel="noopener"><i class="fa-solid fa-receipt"></i><span>View receipt</span></a>
+        <a class="secondary-button link-button" href="/receipts/${appointment.id}/pdf"><i class="fa-solid fa-file-pdf"></i><span>Download PDF</span></a>
+      </div>`;
+  }
+  return "";
 }
 
 function getDepartmentIcon(name) {
@@ -3588,12 +3711,6 @@ function getDepartmentDescription(name) {
   if (value.includes("ortho") || value.includes("bone")) return "Bones, joints, fractures, sports injuries, and mobility care.";
   if (value.includes("neuro")) return "Brain, spine, nerve, headache, and seizure-related consultation.";
   return "Specialist consultation, diagnosis, follow-up, and OPD care.";
-}
-
-function hashNumber(value) {
-  return String(value || "")
-    .split("")
-    .reduce((total, character) => total + character.charCodeAt(0), 0);
 }
 
 function validateBookingData(data) {
@@ -3803,7 +3920,7 @@ function canCheckIn(appointment) {
   return Boolean(
     appointment &&
       appointment.appointment_date === todayDate() &&
-      !["completed", "cancelled", "skipped", "serving"].includes(status)
+      !["completed", "cancelled", "skipped", "serving", "pending_payment"].includes(status)
   );
 }
 

@@ -1,5 +1,6 @@
 const pool = require("../config/db");
 const { ACTIVE_QUEUE_STATUSES } = require("../utils/slots");
+const { releaseExpiredHolds } = require("../services/booking");
 const PRIORITY_SORT_SQL = `CASE WHEN COALESCE(a.priority, 'normal') = 'emergency' THEN 0 ELSE 1 END`;
 const DOCTOR_PRIORITY_SORT_SQL = `CASE WHEN COALESCE(priority, 'normal') = 'emergency' THEN 0 ELSE 1 END`;
 
@@ -399,6 +400,7 @@ async function markNotificationsRead(req, res, next) {
 
 async function getAppointmentDetails(req, res, next) {
   try {
+    await releaseExpiredHolds(pool);
     const { appointmentId } = req.params;
     const result = await pool.query(
       `SELECT a.id, a.user_name, a.mobile,
@@ -410,6 +412,10 @@ async function getAppointmentDetails(req, res, next) {
               COALESCE(a.priority, 'normal') AS priority,
               a.reason_for_visit,
               a.visit_notes,
+              a.fee_amount,
+              GREATEST(EXTRACT(EPOCH FROM (a.hold_expires_at - NOW())), 0)::int AS hold_seconds_left,
+              (SELECT receipt_no FROM receipts WHERE appointment_id = a.id) AS receipt_no,
+              (SELECT status FROM appointment_payments WHERE appointment_id = a.id ORDER BY id DESC LIMIT 1) AS payment_status,
               d.id AS doctor_id, d.name AS doctor_name, d.specialization,
               d.department_id, dep.name AS department_name,
               d.max_patients_per_day, d.qualification, d.experience_years, d.consultation_fee,
@@ -454,6 +460,7 @@ async function getAppointmentDetails(req, res, next) {
 
 async function getMyAppointments(req, res, next) {
   try {
+    await releaseExpiredHolds(pool);
     const result = await pool.query(
       `SELECT a.id, a.user_name, a.mobile,
               TO_CHAR(a.appointment_date, 'YYYY-MM-DD') AS appointment_date,
@@ -464,6 +471,10 @@ async function getMyAppointments(req, res, next) {
               COALESCE(a.priority, 'normal') AS priority,
               a.reason_for_visit,
               a.visit_notes,
+              a.fee_amount,
+              GREATEST(EXTRACT(EPOCH FROM (a.hold_expires_at - NOW())), 0)::int AS hold_seconds_left,
+              (SELECT receipt_no FROM receipts WHERE appointment_id = a.id) AS receipt_no,
+              (SELECT status FROM appointment_payments WHERE appointment_id = a.id ORDER BY id DESC LIMIT 1) AS payment_status,
               d.id AS doctor_id, d.name AS doctor_name, d.specialization,
               d.department_id, dep.name AS department_name,
               d.max_patients_per_day, d.qualification, d.experience_years, d.consultation_fee,

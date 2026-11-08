@@ -196,7 +196,8 @@ async function createAppointment(req, res, next) {
                  status,
                  patient_id,
                  fee_amount,
-                 hold_expires_at`,
+                 hold_expires_at,
+                 GREATEST(EXTRACT(EPOCH FROM (hold_expires_at - NOW())), 0)::int AS hold_seconds_left`,
       [
         req.user.id,
         bookingName.trim(),

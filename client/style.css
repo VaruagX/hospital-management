@@ -2099,3 +2099,168 @@ body.is-login {
     max-width: none;
   }
 }
+
+/* ==========================================================================
+   Premium refresh, step 1 (design tokens, header, flatter surfaces)
+   Healthcare teal on clean white/soft grey. Later rules override earlier ones on purpose;
+   the full per-page redesign continues from these tokens.
+   ========================================================================== */
+:root {
+  --bg: #f4f7fa;
+  --bg-alt: #eaf0f5;
+  --panel: #ffffff;
+  --panel-strong: #ffffff;
+  --panel-solid: #ffffff;
+  --line: #e1e8ee;
+  --line-strong: rgba(14, 116, 144, 0.35);
+  --text: #12202c;
+  --muted: #5d6e7e;
+  --accent: #0e7490;
+  --accent-2: #0891b2;
+  --accent-soft: rgba(14, 116, 144, 0.09);
+  --teal-soft: rgba(8, 145, 178, 0.1);
+  --shadow: 0 1px 2px rgba(18, 32, 44, 0.05), 0 8px 24px rgba(18, 32, 44, 0.06);
+  --shadow-soft: 0 1px 2px rgba(18, 32, 44, 0.04), 0 4px 14px rgba(18, 32, 44, 0.05);
+  --radius-xl: 18px;
+  --radius-lg: 14px;
+  --radius-md: 10px;
+  --gradient: linear-gradient(180deg, #f8fafc 0%, #f1f5f8 100%);
+  --page-pattern: none;
+}
+
+/* Glass blur and the decorative overlay are gone: crisp, quiet surfaces. */
+.topbar,
+.card,
+.stat-card,
+.form-card,
+.table-card,
+.hero-card,
+.list-card,
+.queue-card,
+.chart-card,
+.spinner-card,
+.toast {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.brand-badge,
+.login-logo {
+  box-shadow: 0 6px 16px rgba(14, 116, 144, 0.25);
+}
+
+/* Header: brand + title on the left, navigation and account controls on the right.
+   The old rule broke headings mid-word (overflow-wrap: anywhere) when space was tight. */
+.topbar {
+  top: 12px;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  padding: 14px 18px;
+  background: var(--panel-solid);
+}
+
+.topbar::before {
+  display: none;
+}
+
+.topbar__intro {
+  flex: 0 1 auto;
+  min-width: 0;
+  flex-wrap: wrap;
+  row-gap: 8px;
+}
+
+.topbar h2,
+.topbar__brand h1 {
+  overflow-wrap: normal;
+  word-break: normal;
+}
+
+.topbar h2 {
+  font-size: clamp(1.1rem, 1.6vw, 1.45rem);
+  line-height: 1.2;
+}
+
+/* Desktop only: row 1 = brand + title left, theme / account / logout right; row 2 = full-width navigation.
+   Below 921px the existing slide-in drawer (.topbar__meta) is used unchanged. */
+@media (min-width: 921px) {
+  .topbar__meta {
+    display: contents;
+  }
+
+  .topbar__intro {
+    order: 1;
+    margin-right: auto;
+  }
+
+  .topbar__meta > :not(.topbar__nav) {
+    order: 2;
+    align-self: center;
+  }
+
+  .topbar__nav {
+    order: 3;
+    flex: 1 1 100%;
+    justify-content: flex-start;
+    gap: 8px;
+    padding-top: 12px;
+    border-top: 1px solid var(--line);
+  }
+}
+
+.status-badge--pending_payment {
+  color: #92400e;
+  background: #fef3c7;
+  border-color: #fde68a;
+}
+
+.status-badge--pending_payment i,
+.status-badge--pending_payment::before {
+  color: inherit;
+}
+
+@media (max-width: 920px) {
+  .topbar__intro {
+    min-width: 0;
+    width: 100%;
+  }
+}
+
+/* Booking: compact two-week calendar above the time slots (was one 14-row column). */
+.schedule-grid {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.calendar-strip {
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.calendar-day {
+  min-height: 0;
+  padding: 10px 6px;
+  gap: 2px;
+  border-radius: var(--radius-md);
+  box-shadow: none;
+}
+
+.calendar-day strong {
+  font-size: 1.15rem;
+}
+
+.calendar-day[disabled] {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.slot-choice[disabled] {
+  opacity: 0.5;
+  cursor: not-allowed;
+  background: var(--bg-alt);
+}
+
+@media (max-width: 520px) {
+  .calendar-strip {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
